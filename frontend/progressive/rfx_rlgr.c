@@ -619,23 +619,6 @@ static const struct {
     { 4015, 81   },  /* LL3 */
 };
 
-/* Subband offsets and sizes for non-extrapolated tiles */
-static const struct {
-    size_t offset;
-    size_t length;
-} SUBBAND_NORMAL[10] = {
-    { 0,    1024 },  /* HL1 */
-    { 1024, 1024 },  /* LH1 */
-    { 2048, 1024 },  /* HH1 */
-    { 3072, 256  },  /* HL2 */
-    { 3328, 256  },  /* LH2 */
-    { 3584, 256  },  /* HH2 */
-    { 3840, 64   },  /* HL3 */
-    { 3904, 64   },  /* LH3 */
-    { 3968, 64   },  /* HH3 */
-    { 4032, 64   },  /* LL3 */
-};
-
 /**
  * Upgrade a single subband block using SRL and RAW streams
  * Based on FreeRDP's progressive_rfx_upgrade_block
@@ -662,43 +645,33 @@ static void upgrade_subband_block(SRL_STATE* srl, BITSTREAM* raw,
     {
         int32_t input = 0;
         
+        /* Bits are consumed unconditionally, as in FreeRDP: bailing out early on an
+         * exhausted stream would desynchronise every following subband. */
         if (isLL3)
         {
             /* LL3 subband: always read from RAW stream */
-            if (BitStream_GetRemainingLength(raw) >= numBits)
-            {
-                input = (int16_t)((raw->accumulator >> (32 - numBits)) & mask);
-                BitStream_Shift(raw, numBits);
-            }
+            input = (int16_t)((raw->accumulator >> (32 - numBits)) & mask);
+            BitStream_Shift(raw, numBits);
         }
         else if (sign[i] > 0)
         {
             /* Positive sign: read from RAW stream */
-            if (BitStream_GetRemainingLength(raw) >= numBits)
-            {
-                input = (int16_t)((raw->accumulator >> (32 - numBits)) & mask);
-                BitStream_Shift(raw, numBits);
-            }
+            input = (int16_t)((raw->accumulator >> (32 - numBits)) & mask);
+            BitStream_Shift(raw, numBits);
         }
         else if (sign[i] < 0)
         {
             /* Negative sign: read from RAW stream and negate */
-            if (BitStream_GetRemainingLength(raw) >= numBits)
-            {
-                input = (int16_t)((raw->accumulator >> (32 - numBits)) & mask);
-                BitStream_Shift(raw, numBits);
-                input = -input;
-            }
+            input = (int16_t)((raw->accumulator >> (32 - numBits)) & mask);
+            BitStream_Shift(raw, numBits);
+            input = -input;
         }
         else
         {
             /* Zero sign: read from SRL stream */
-            if (BitStream_GetRemainingLength(srl->bs) > 0)
-            {
-                input = srl_read_value(srl, numBits);
-                /* Store actual decoded value (not just sign bit) like FreeRDP */
-                sign[i] = (int16_t)input;
-            }
+            input = srl_read_value(srl, numBits);
+            /* Store actual decoded value (not just sign bit) like FreeRDP */
+            sign[i] = (int16_t)input;
         }
         
         /* Apply shift and add to current coefficient */
@@ -760,9 +733,12 @@ int rfx_progressive_upgrade_component(
     srlState.nz = 0;
     srlState.mode = 0;
     
-    /* Select subband layout based on extrapolate flag */
-    const struct { size_t offset; size_t length; }* subbands = 
-        extrapolate ? SUBBAND_EXTRAPOLATED : SUBBAND_NORMAL;
+    /* Upgrade passes always use the extrapolated layout, even for non-extrapolated
+     * tiles - this mirrors FreeRDP's progressive_rfx_upgrade_component, which ignores
+     * the extrapolate flag. Using the non-extrapolated offsets here writes refinement
+     * bits to the wrong coefficients and desynchronises the SRL/RAW streams. */
+    (void)extrapolate;
+    const struct { size_t offset; size_t length; }* subbands = SUBBAND_EXTRAPOLATED;
     
     /* Process each subband with its own shift and numBits */
     /* Order: HL1, LH1, HH1, HL2, LH2, HH2, HL3, LH3, HH3, LL3 */

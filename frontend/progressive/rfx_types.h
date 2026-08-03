@@ -180,10 +180,15 @@ typedef struct {
     
     /* Per-tile clipRect tracking - stores clipRects active when each tile was decoded
      * This is necessary because multiple regions per frame can have different clipRects */
-    uint16_t tileClipRectStart[RFX_MAX_TILES_PER_SURFACE];  /* Start index in perTileClipRects */
+    uint32_t tileClipRectStart[RFX_MAX_TILES_PER_SURFACE];  /* Start index in perTileClipRects */
     uint16_t tileClipRectCount[RFX_MAX_TILES_PER_SURFACE];  /* Count of clipRects for this tile */
     RfxRect perTileClipRects[RFX_MAX_TILES_PER_SURFACE * 8]; /* Buffer for all tile clipRects (8 per tile max) */
     uint32_t perTileClipRectsTotal;  /* Total clipRects stored in buffer */
+
+    /* Current region's clipRects within perTileClipRects; tiles reference these so the
+     * full set is kept (copying per tile would force truncation). */
+    uint32_t regionClipStart;
+    uint16_t regionClipCount;
     
     /* Clipping rectangles for current region (per MS-RDPEGFX 2.2.4.2)
      * Tiles are only rendered if they intersect with at least one clip rect.

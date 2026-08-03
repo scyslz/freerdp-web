@@ -99,6 +99,12 @@ static TileWorkItem pending_tiles[MAX_PENDING_TILES];
 static int pending_count = 0;
 static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Guards the shared updated-tile list, which worker threads append to concurrently */
+static pthread_mutex_t updated_tiles_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Guards lazy tile allocation, which worker threads can hit for the same slot */
+static pthread_mutex_t tile_alloc_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /**
  * Get or initialize thread-local decode buffers
  */
@@ -289,7 +295,7 @@ void prog_reset_surface(ProgressiveContext* ctx, uint16_t surfaceId) {
             memset(surface->tiles[i]->yData, 0, TILE_PIXELS * sizeof(int16_t));
             memset(surface->tiles[i]->cbData, 0, TILE_PIXELS * sizeof(int16_t));
             memset(surface->tiles[i]->crData, 0, TILE_PIXELS * sizeof(int16_t));
-            memset(surface->tiles[i]->sign, 0, TILE_PIXELS * 3);
+            memset(surface->tiles[i]->sign, 0, TILE_PIXELS * 3 * sizeof(int16_t));
         }
     }
 }
@@ -304,7 +310,12 @@ static RfxTile* get_or_create_tile(RfxSurface* surface, uint16_t xIdx, uint16_t 
     
     uint32_t idx = yIdx * surface->gridWidth + xIdx;
     if (!surface->tiles[idx]) {
-        surface->tiles[idx] = alloc_tile(xIdx, yIdx);
+        /* Worker threads may race for the same slot during parallel decode */
+        pthread_mutex_lock(&tile_alloc_mutex);
+        if (!surface->tiles[idx]) {
+            surface->tiles[idx] = alloc_tile(xIdx, yIdx);
+        }
+        pthread_mutex_unlock(&tile_alloc_mutex);
     }
     
     return surface->tiles[idx];
@@ -439,46 +450,53 @@ static inline bool tile_intersects_clip(ProgressiveContext* ctx, uint16_t tileX,
 }
 
 /**
- * Add a tile to the updated tiles list with its current clipRects
- * This stores the clipRects that were active when the tile was decoded,
- * so JavaScript can use the correct clipRects for each tile (important when
- * multiple regions with different clipRects are in one frame).
+ * Copy the region's clipRects into the shared buffer once, so every tile in the
+ * region can reference the complete set. Copying per tile would force truncation,
+ * and a truncated set makes the renderer fall back to an unclipped full-tile blit
+ * that overwrites content drawn by other codecs (ClearCodec, H.264).
+ */
+static void store_region_cliprects(ProgressiveContext* ctx) {
+    const uint32_t capacity = RFX_MAX_TILES_PER_SURFACE * 8;
+
+    pthread_mutex_lock(&updated_tiles_mutex);
+
+    if (ctx->numClipRects == 0 ||
+        ctx->perTileClipRectsTotal + ctx->numClipRects > capacity) {
+        ctx->regionClipStart = 0;
+        ctx->regionClipCount = 0;
+    } else {
+        ctx->regionClipStart = ctx->perTileClipRectsTotal;
+        ctx->regionClipCount = ctx->numClipRects;
+        for (uint16_t i = 0; i < ctx->numClipRects; i++) {
+            ctx->perTileClipRects[ctx->regionClipStart + i] = ctx->clipRects[i];
+        }
+        ctx->perTileClipRectsTotal += ctx->numClipRects;
+    }
+
+    pthread_mutex_unlock(&updated_tiles_mutex);
+}
+
+/**
+ * Add a tile to the updated tiles list, referencing the clipRects of the region
+ * it was decoded in (multiple regions per frame can have different clipRects).
+ *
+ * Called from worker threads during parallel decode, so the shared list is mutex-guarded.
  */
 static inline void add_updated_tile_with_cliprects(ProgressiveContext* ctx, uint32_t tileIdx) {
+    pthread_mutex_lock(&updated_tiles_mutex);
+
     if (ctx->numUpdatedTiles >= RFX_MAX_TILES_PER_SURFACE) {
+        pthread_mutex_unlock(&updated_tiles_mutex);
         return;
     }
-    
-    /* Store the tile index */
+
     uint32_t tileListIdx = ctx->numUpdatedTiles;
     ctx->updatedTileIndices[tileListIdx] = tileIdx;
-    
-    /* Store clipRect offset and count for this tile */
-    ctx->tileClipRectStart[tileListIdx] = (uint16_t)ctx->perTileClipRectsTotal;
-    
-    /* Store the ACTUAL clipRect count from the region
-     * If there are more than 16 clipRects, we signal JavaScript to draw the tile fully
-     * by storing the high count (it will check > 16 and draw fully) */
-    uint16_t actualCount = ctx->numClipRects;
-    
-    /* Copy current clipRects to per-tile buffer (limit to 16 per tile) */
-    uint16_t numToCopy = (actualCount <= 16) ? actualCount : 16;
-    
-    /* Check if we have room in the buffer */
-    if (ctx->perTileClipRectsTotal + numToCopy > RFX_MAX_TILES_PER_SURFACE * 8) {
-        /* No room - store 0 clipRects, tile will draw fully */
-        ctx->tileClipRectCount[tileListIdx] = 0;
-    } else {
-        /* Store the actual count (even if > 16, JS will handle it) */
-        ctx->tileClipRectCount[tileListIdx] = actualCount;
-        
-        for (uint16_t i = 0; i < numToCopy; i++) {
-            ctx->perTileClipRects[ctx->perTileClipRectsTotal + i] = ctx->clipRects[i];
-        }
-        ctx->perTileClipRectsTotal += numToCopy;
-    }
-    
+    ctx->tileClipRectStart[tileListIdx] = ctx->regionClipStart;
+    ctx->tileClipRectCount[tileListIdx] = ctx->regionClipCount;
     ctx->numUpdatedTiles++;
+
+    pthread_mutex_unlock(&updated_tiles_mutex);
 }
 
 /**
@@ -1072,6 +1090,8 @@ static int decode_region(ProgressiveContext* ctx, RfxSurface* surface,
         offset += (numRects - 256) * 8;
     }
     if (size < offset) return -1;
+
+    store_region_cliprects(ctx);
     
     /* Parse quantization values */
     int quantBytes = parse_quant_vals(data + offset, size - offset, ctx->quantVals, numQuant);
@@ -1143,20 +1163,28 @@ int prog_decompress(ProgressiveContext* ctx, const uint8_t* srcData,
     
     ctx->frameId = frameId;
     ctx->currentSurfaceId = surfaceId;
-    surface->frameId = frameId;
-    
-    /* Clear dirty flags */
-    for (uint32_t i = 0; i < surface->gridSize; i++) {
-        if (surface->tiles[i]) {
-            surface->tiles[i]->dirty = false;
+
+    /* A frame can span several PROG messages. FreeRDP keeps the updated-tile list for the
+     * whole frame and re-blits it against every message's clip region, which is how a tile
+     * sent by one message still gets painted under a later message's rects. */
+    if (surface->frameId != frameId) {
+        surface->frameId = frameId;
+        for (uint32_t i = 0; i < surface->gridSize; i++) {
+            if (surface->tiles[i]) {
+                surface->tiles[i]->dirty = false;
+            }
         }
+        ctx->numUpdatedTiles = 0;
     }
-    
+
+    const uint32_t carryOverTiles = ctx->numUpdatedTiles;
+    bool regionParsed = false;
+
     size_t offset = 0;
     
-    /* Reset updated tile tracking for new frame */
-    ctx->numUpdatedTiles = 0;
     ctx->perTileClipRectsTotal = 0;
+    ctx->regionClipStart = 0;
+    ctx->regionClipCount = 0;
     
     while (offset + 6 <= srcSize) {
         uint16_t blockType = read_u16_le(srcData + offset);
@@ -1202,7 +1230,7 @@ int prog_decompress(ProgressiveContext* ctx, const uint8_t* srcData,
                                 memset(surface->tiles[i]->yData, 0, TILE_PIXELS * sizeof(int16_t));
                                 memset(surface->tiles[i]->cbData, 0, TILE_PIXELS * sizeof(int16_t));
                                 memset(surface->tiles[i]->crData, 0, TILE_PIXELS * sizeof(int16_t));
-                                memset(surface->tiles[i]->sign, 0, TILE_PIXELS * 3);
+                                memset(surface->tiles[i]->sign, 0, TILE_PIXELS * 3 * sizeof(int16_t));
                             }
                         }
                     }
@@ -1242,10 +1270,20 @@ int prog_decompress(ProgressiveContext* ctx, const uint8_t* srcData,
                 
             case PROGRESSIVE_WBT_REGION:
                 decode_region(ctx, surface, blockData, blockDataSize);
+                regionParsed = true;
                 break;
         }
         
         offset += blockLen;
+    }
+    
+    /* Re-point tiles carried over from earlier messages of this frame at this message's
+     * region, so the part of a tile that only a later region covers still gets painted. */
+    if (regionParsed) {
+        for (uint32_t i = 0; i < carryOverTiles && i < ctx->numUpdatedTiles; i++) {
+            ctx->tileClipRectStart[i] = ctx->regionClipStart;
+            ctx->tileClipRectCount[i] = ctx->regionClipCount;
+        }
     }
     
     return 0;
@@ -1630,11 +1668,25 @@ static void start_worker_threads(void) {
     workers_started = true;
 }
 
+static void wait_for_tiles(void);
+
 /**
- * Submit a tile job to the work queue
+ * Submit a tile job to the work queue.
+ * Returns false if the tile could not be queued, so the caller can decode it inline
+ * rather than dropping it (a dropped tile leaves a stale hole on screen).
  */
-static void submit_tile_job(ProgressiveContext* ctx, RfxSurface* surface,
+static bool submit_tile_job(ProgressiveContext* ctx, RfxSurface* surface,
                            const uint8_t* data, size_t size, uint16_t blockType) {
+    pthread_mutex_lock(&work_queue.lock);
+    bool full = (work_queue.count >= MAX_PENDING_TILES);
+    pthread_mutex_unlock(&work_queue.lock);
+
+    /* Drain rather than drop: the queue is bounded but a region may exceed it */
+    if (full) {
+        wait_for_tiles();
+    }
+
+    bool queued = false;
     pthread_mutex_lock(&work_queue.lock);
     
     if (work_queue.count < MAX_PENDING_TILES) {
@@ -1648,13 +1700,14 @@ static void submit_tile_job(ProgressiveContext* ctx, RfxSurface* surface,
             job->size = size;
             job->blockType = blockType;
             work_queue.count++;
+            queued = true;
             /* Wake up workers immediately when work is available */
             pthread_cond_signal(&work_queue.work_ready);
         }
     }
-    /* Note: Tile queue full condition silently drops tiles - check work_queue.count if debugging */
     
     pthread_mutex_unlock(&work_queue.lock);
+    return queued;
 }
 
 /**
@@ -1724,6 +1777,8 @@ static int decode_region_parallel(ProgressiveContext* ctx, RfxSurface* surface,
         offset += (numRects - 256) * 8;
     }
     if (size < offset) return -1;
+
+    store_region_cliprects(ctx);
     
     /* Memory barrier to ensure clipRects are visible to worker threads
      * This is critical for parallel decoding with SharedArrayBuffer */
@@ -1757,7 +1812,20 @@ static int decode_region_parallel(ProgressiveContext* ctx, RfxSurface* surface,
         if (blockType == PROGRESSIVE_WBT_TILE_SIMPLE ||
             blockType == PROGRESSIVE_WBT_TILE_FIRST ||
             blockType == PROGRESSIVE_WBT_TILE_UPGRADE) {
-            submit_tile_job(ctx, surface, tileData, tileSize, blockType);
+            if (!submit_tile_job(ctx, surface, tileData, tileSize, blockType)) {
+                /* Queue exhausted or allocation failed - decode inline so no tile is lost */
+                switch (blockType) {
+                    case PROGRESSIVE_WBT_TILE_SIMPLE:
+                        decode_tile_simple(ctx, surface, tileData, tileSize);
+                        break;
+                    case PROGRESSIVE_WBT_TILE_FIRST:
+                        decode_tile_first(ctx, surface, tileData, tileSize);
+                        break;
+                    case PROGRESSIVE_WBT_TILE_UPGRADE:
+                        decode_tile_upgrade(ctx, surface, tileData, tileSize);
+                        break;
+                }
+            }
         }
         
         offset += blockLen;
@@ -1789,20 +1857,28 @@ int prog_decompress_parallel(ProgressiveContext* ctx, const uint8_t* srcData,
     
     ctx->frameId = frameId;
     ctx->currentSurfaceId = surfaceId;
-    surface->frameId = frameId;
-    
-    /* Clear dirty flags */
-    for (uint32_t i = 0; i < surface->gridSize; i++) {
-        if (surface->tiles[i]) {
-            surface->tiles[i]->dirty = false;
+
+    /* A frame can span several PROG messages. FreeRDP keeps the updated-tile list for the
+     * whole frame and re-blits it against every message's clip region, which is how a tile
+     * sent by one message still gets painted under a later message's rects. */
+    if (surface->frameId != frameId) {
+        surface->frameId = frameId;
+        for (uint32_t i = 0; i < surface->gridSize; i++) {
+            if (surface->tiles[i]) {
+                surface->tiles[i]->dirty = false;
+            }
         }
+        ctx->numUpdatedTiles = 0;
     }
-    
+
+    const uint32_t carryOverTiles = ctx->numUpdatedTiles;
+    bool regionParsed = false;
+
     size_t offset = 0;
     
-    /* Reset updated tile tracking for new frame */
-    ctx->numUpdatedTiles = 0;
     ctx->perTileClipRectsTotal = 0;
+    ctx->regionClipStart = 0;
+    ctx->regionClipCount = 0;
     
     while (offset + 6 <= srcSize) {
         uint16_t blockType = read_u16_le(srcData + offset);
@@ -1838,7 +1914,7 @@ int prog_decompress_parallel(ProgressiveContext* ctx, const uint8_t* srcData,
                             memset(surface->tiles[i]->yData, 0, TILE_PIXELS * sizeof(int16_t));
                             memset(surface->tiles[i]->cbData, 0, TILE_PIXELS * sizeof(int16_t));
                             memset(surface->tiles[i]->crData, 0, TILE_PIXELS * sizeof(int16_t));
-                            memset(surface->tiles[i]->sign, 0, TILE_PIXELS * 3);
+                            memset(surface->tiles[i]->sign, 0, TILE_PIXELS * 3 * sizeof(int16_t));
                         }
                     }
                     
@@ -1881,6 +1957,7 @@ int prog_decompress_parallel(ProgressiveContext* ctx, const uint8_t* srcData,
                 /* Wait for this region's tiles to complete BEFORE parsing next region,
                  * because clipRects are stored in ctx and would be overwritten */
                 wait_for_tiles();
+                regionParsed = true;
                 break;
         }
         
@@ -1889,6 +1966,15 @@ int prog_decompress_parallel(ProgressiveContext* ctx, const uint8_t* srcData,
     
     /* Wait for all tiles to complete */
     wait_for_tiles();
+    
+    /* Re-point tiles carried over from earlier messages of this frame at this message's
+     * region, so the part of a tile that only a later region covers still gets painted. */
+    if (regionParsed) {
+        for (uint32_t i = 0; i < carryOverTiles && i < ctx->numUpdatedTiles; i++) {
+            ctx->tileClipRectStart[i] = ctx->regionClipStart;
+            ctx->tileClipRectCount[i] = ctx->regionClipCount;
+        }
+    }
     
     return 0;
 }

@@ -542,10 +542,9 @@ function decodeProgressiveTile(msg) {
             const tileClipRectCount = wasmModule._prog_get_tile_clip_rect_count ? 
                 wasmModule._prog_get_tile_clip_rect_count(progCtx, i) : 0;
             
-            // If count is 0, > 16 (too many to store), or undefined, draw the full tile
-            // This ensures tiles from regions with many clipRects (like full-screen wallpaper) draw correctly
-            if (tileClipRectCount === 0 || tileClipRectCount > 16) {
-                // No clipRects or too many - draw the full tile
+            // Count 0 means the region was unclipped, so the whole tile is in scope.
+            // Never blit unclipped otherwise: that would overwrite ClearCodec/H.264 content.
+            if (tileClipRectCount === 0) {
                 surface.ctx.putImageData(imageData, tileX, tileY, 0, 0, tileW, tileH);
                 tileWasDrawn = true;
             } else {
