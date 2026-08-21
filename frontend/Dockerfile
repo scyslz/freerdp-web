@@ -38,7 +38,7 @@ RUN mkdir -p build && cd build && \
 FROM nginx:alpine
 
 # Copy static files (excluding progressive source)
-COPY index*.html /usr/share/nginx/html/
+COPY index.html /usr/share/nginx/html/
 COPY rdp-*.js /usr/share/nginx/html/
 COPY wire-format.js /usr/share/nginx/html/
 COPY gfx-worker.js /usr/share/nginx/html/
