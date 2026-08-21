@@ -224,6 +224,9 @@ ARG REBUILD_NEEDED=0
 COPY requirements.txt .
 
 # Install Python dependencies
+# PIP_INDEX_URL is read by pip from the environment; override it when the build host
+# sits behind a package feed proxy that blocks direct pypi.org/files.pythonhosted.org access.
+ARG PIP_INDEX_URL=https://pypi.org/simple
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code

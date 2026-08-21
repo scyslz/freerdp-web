@@ -29,6 +29,26 @@ if($JustRun -and $JustBuild) {
 # current path of the script
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+# The backend image installs Python packages with pip. On machines behind a package feed
+# proxy, pypi.org/files.pythonhosted.org is unreachable from inside the container, so mirror
+# the host's configured index-url into the build.
+function Get-PipIndexUrl {
+    $defaultIndex = "https://pypi.org/simple"
+
+    if ($env:PIP_INDEX_URL) {
+        return $env:PIP_INDEX_URL
+    }
+    if (-not (Get-Command pip -ErrorAction SilentlyContinue)) {
+        return $defaultIndex
+    }
+
+    $config = (& pip config list 2>$null | Out-String)
+    if ($config -match "global\.index-url\s*=\s*['`"]?([^'`"\r\n]+)") {
+        return $Matches[1].Trim()
+    }
+    return $defaultIndex
+}
+
 if($image -eq "frontend") {
     Write-Host "$scriptDir/frontend"
     Set-Location "$scriptDir/frontend"
@@ -69,17 +89,19 @@ elseif($image -eq "backend") {
     Set-Location "$scriptDir/backend"
     Write-Host "Building and running backend..."
     if(-not $JustRun) {
+        $pipIndexUrl = Get-PipIndexUrl
+        Write-Host "Using pip index: $pipIndexUrl"
         try {
             if($NoCache) {
                 docker rmi rdp-backend:latest | Out-Null
                 if($PullLatestBaseImage) {
-                    docker build --no-cache --pull -t rdp-backend .
+                    docker build --no-cache --pull -t rdp-backend --build-arg PIP_INDEX_URL=$pipIndexUrl .
                     if($LASTEXITCODE -ne 0) {
                         throw "Docker build failed with exit code $LASTEXITCODE"
                     }
                 }
                 else {
-                    docker build --no-cache -t rdp-backend .
+                    docker build --no-cache -t rdp-backend --build-arg PIP_INDEX_URL=$pipIndexUrl .
                     if($LASTEXITCODE -ne 0) {
                         throw "Docker build failed with exit code $LASTEXITCODE"
                     }
@@ -93,7 +115,7 @@ elseif($image -eq "backend") {
                     $REBUILD_NEEDED = "0"
                 }
 
-                docker build -t rdp-backend --build-arg REBUILD_NEEDED=$REBUILD_NEEDED .
+                docker build -t rdp-backend --build-arg REBUILD_NEEDED=$REBUILD_NEEDED --build-arg PIP_INDEX_URL=$pipIndexUrl .
                 if($LASTEXITCODE -ne 0) {
                     throw "Docker build failed with exit code $LASTEXITCODE"
                 }
