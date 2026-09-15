@@ -148,6 +148,7 @@ RDP_GFX_EVENT_INIT_SETTINGS = 15
 RDP_GFX_EVENT_POINTER_POSITION = 16
 RDP_GFX_EVENT_POINTER_SYSTEM = 17
 RDP_GFX_EVENT_POINTER_SET = 18
+RDP_GFX_EVENT_CLIPBOARD_TEXT = 19
 
 
 class RdpGfxEvent(Structure):
@@ -413,6 +414,10 @@ class NativeLibrary:
         # rdp_free_gfx_event_data
         lib.rdp_free_gfx_event_data.argtypes = [c_void_p]
         lib.rdp_free_gfx_event_data.restype = None
+
+        # rdp_clipboard_set_text
+        lib.rdp_clipboard_set_text.argtypes = [c_void_p, c_char_p, c_uint32]
+        lib.rdp_clipboard_set_text.restype = c_int
         
         # Session registry functions
         # rdp_set_max_sessions
@@ -619,7 +624,7 @@ class RDPBridge:
     
     def send_frame_ack(self, frame_id: int, total_frames_decoded: int, queue_depth: int = 0) -> bool:
         """Send a frame acknowledgment to the RDP server.
-        
+
         This forwards the browser's FACK message to FreeRDP, providing proper
         backpressure. The server uses these ACKs to control its frame rate -
         if ACKs are delayed (browser is slow to decode), the server slows down.
@@ -647,10 +652,25 @@ class RDPBridge:
         except Exception as e:
             logger.error(f"Frame ACK error: {e}")
             return False
+
+    def send_clipboard_text(self, text: str) -> bool:
+        """Push browser clipboard text to the Windows session."""
+        if not self._session or not self._lib:
+            logger.warning("Cannot send clipboard: session not active")
+            return False
+        try:
+            data = text.encode('utf-8')
+            if not data or len(data) > 1024 * 1024:
+                return False
+            result = self._lib.rdp_clipboard_set_text(self._session, data, len(data))
+            return result == 0
+        except Exception as e:
+            logger.error(f"Clipboard send error: {e}")
+            return False
     
     def _build_gfx_event_message(self, event: RdpGfxEvent) -> Optional[bytes]:
         """Build binary wire format message for a GFX event.
-        
+
         Args:
             event: GFX event from native library
             
@@ -822,6 +842,13 @@ class RDPBridge:
                     bgra_data
                 )
             return None
+        elif event.type == RDP_GFX_EVENT_CLIPBOARD_TEXT:
+            # Remote clipboard text (UTF-8 in bitmap_data) -> JSON to browser
+            if event.bitmap_data and event.bitmap_size > 0:
+                text = ctypes.string_at(event.bitmap_data, event.bitmap_size).decode('utf-8', errors='replace')
+                self._lib.rdp_free_gfx_event_data(event.bitmap_data)
+                return json.dumps({'type': 'clipboard', 'text': text}).encode('utf-8')
+            return None
         else:
             # Unhandled event type
             return None
@@ -884,7 +911,10 @@ class RDPBridge:
                     # Send event (all types including VIDEO_FRAME are handled by _build_gfx_event_message)
                     msg = self._build_gfx_event_message(gfx_event)
                     if msg:
-                        await self.websocket.send(msg)
+                        if gfx_event.type == RDP_GFX_EVENT_CLIPBOARD_TEXT:
+                            await self.websocket.send(msg.decode('utf-8'))
+                        else:
+                            await self.websocket.send(msg)
                         events_sent += 1
                     
                     # Track frame boundaries

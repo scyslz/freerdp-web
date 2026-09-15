@@ -114,6 +114,9 @@ typedef enum {
     RDP_GFX_EVENT_POINTER_POSITION, /* Cursor position update (16) */
     RDP_GFX_EVENT_POINTER_SYSTEM,   /* System pointer (null/default) (17) */
     RDP_GFX_EVENT_POINTER_SET,      /* Set/show a cursor (bitmap data) (18) */
+
+    /* Clipboard events */
+    RDP_GFX_EVENT_CLIPBOARD_TEXT,   /* Remote clipboard text (UTF-8) (19) */
 } RdpGfxEventType;
 
 /* GFX event for Python consumption */
@@ -533,6 +536,19 @@ void rdp_gfx_clear_events(RdpSession* session);
  * @param data      Pointer returned in RdpGfxEvent.bitmap_data
  */
 void rdp_free_gfx_event_data(void* data);
+
+/**
+ * Push local (browser) text to the Windows clipboard
+ *
+ * Announces CF_UNICODETEXT to the server; the text is delivered when the
+ * server requests the format data. Text is UTF-8, max 1MB.
+ *
+ * @param session     Session handle
+ * @param utf8_text   UTF-8 text buffer (not necessarily NUL-terminated)
+ * @param len         Byte length of text
+ * @return            0 on success, -1 if clipboard channel not ready
+ */
+int rdp_clipboard_set_text(RdpSession* session, const char* utf8_text, uint32_t len);
 
 #ifdef __cplusplus
 }

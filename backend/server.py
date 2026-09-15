@@ -324,6 +324,18 @@ async def handle_client(websocket: ServerConnection):
                 
                 elif msg_type == 'ping':
                     await websocket.send(json.dumps({'type': 'pong'}))
+
+                elif msg_type == 'clipboard':
+                    if rdp_bridge:
+                        text = data.get('text', '')
+                        if not isinstance(text, str) or not text or len(text) > 1024 * 1024:
+                            continue
+                        ok = rdp_bridge.send_clipboard_text(text)
+                        if not ok:
+                            await websocket.send(json.dumps({
+                                'type': 'error',
+                                'message': 'Failed to send clipboard text'
+                            }))
                 
                 elif msg_type == 'ack_frame':
                     # Acknowledge H.264 frame - FreeRDP handles this automatically

@@ -29,6 +29,8 @@
 #include <freerdp/channels/rdpsnd.h>
 #include <freerdp/channels/rdpgfx.h>
 #include <freerdp/channels/drdynvc.h>
+#include <freerdp/channels/cliprdr.h>
+#include <freerdp/client/cliprdr.h>
 #include <freerdp/client/disp.h>
 #include <freerdp/client/rdpsnd.h>
 #include <freerdp/client/rdpgfx.h>
@@ -42,6 +44,7 @@
 #include <winpr/crt.h>
 #include <winpr/synch.h>
 #include <winpr/thread.h>
+#include <winpr/clipboard.h>
 #include <winpr/collections.h>
 #include <freerdp/codec/region.h>
 
@@ -125,7 +128,11 @@ typedef struct {
     
     /* Audio playback */
     rdpsndDevicePlugin* rdpsnd;
-    OpusEncoder* opus_encoder;
+    /* Clipboard (cliprdr) */
+    CliprdrClientContext* cliprdr;
+    pthread_mutex_t clip_mutex;
+    char* clip_pending_text;          /* browser -> windows text (UTF-8, malloc'd) */
+    uint32_t clip_pending_len;    OpusEncoder* opus_encoder;
     uint8_t* audio_buffer;
     size_t audio_buffer_size;
     size_t audio_buffer_pos;
@@ -222,6 +229,15 @@ static bool transcode_avc444(BridgeContext* ctx,
 
 /* Deferred GDI pipeline initialization - call from main thread */
 static void maybe_init_gfx_pipeline(BridgeContext* bctx);
+
+/* Clipboard (cliprdr) callbacks */
+static UINT clip_on_monitor_ready(CliprdrClientContext* context, const CLIPRDR_MONITOR_READY* monitorReady);
+static UINT clip_on_server_caps(CliprdrClientContext* context, const CLIPRDR_CAPABILITIES* caps);
+static UINT clip_on_server_format_list(CliprdrClientContext* context, const CLIPRDR_FORMAT_LIST* formatList);
+static UINT clip_on_server_format_list_resp(CliprdrClientContext* context, const CLIPRDR_FORMAT_LIST_RESPONSE* resp);
+static UINT clip_on_server_data_request(CliprdrClientContext* context, const CLIPRDR_FORMAT_DATA_REQUEST* req);
+static UINT clip_on_server_data_response(CliprdrClientContext* context, const CLIPRDR_FORMAT_DATA_RESPONSE* resp);
+static void clip_send_local_text(BridgeContext* ctx);
 
 /* Global audio context structure for plugin communication.
  * This is a regular global (not thread-local) because the rdpsnd plugin
@@ -715,6 +731,10 @@ RdpSession* rdp_create(
     pthread_mutex_init(&ctx->opus_mutex, NULL);
     pthread_mutex_init(&ctx->gfx_mutex, NULL);
     pthread_mutex_init(&ctx->gfx_event_mutex, NULL);
+    pthread_mutex_init(&ctx->clip_mutex, NULL);
+    ctx->cliprdr = NULL;
+    ctx->clip_pending_text = NULL;
+    ctx->clip_pending_len = 0;
     ctx->audio_initialized = false;
     ctx->audio_buffer = NULL;
     ctx->audio_buffer_size = 0;
@@ -1034,6 +1054,11 @@ void rdp_destroy(RdpSession* session)
     pthread_mutex_destroy(&ctx->opus_mutex);
     pthread_mutex_destroy(&ctx->gfx_mutex);
     pthread_mutex_destroy(&ctx->gfx_event_mutex);
+    pthread_mutex_destroy(&ctx->clip_mutex);
+    if (ctx->clip_pending_text) {
+        free(ctx->clip_pending_text);
+        ctx->clip_pending_text = NULL;
+    }
     
     /* Free audio resources */
     if (ctx->opus_encoder) {
@@ -1898,6 +1923,7 @@ static void bridge_post_disconnect(freerdp* instance)
     ctx->disp = NULL;
     ctx->gfx = NULL;
     ctx->rdpsnd = NULL;
+    ctx->cliprdr = NULL;
     ctx->state = RDP_STATE_DISCONNECTED;
     
     /* Free AVC444 transcoder (FFmpeg decoder/encoder frames) */
@@ -1952,7 +1978,7 @@ static void bridge_on_channel_connected(void* ctx, const ChannelConnectedEventAr
     }
     else if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0) {
         /* GFX pipeline connected - save context and set deferred init flag.
-         * 
+         *
          * We do NOT call gdi_graphics_pipeline_init() here because it causes
          * thread-safety issues (GDI reinit in different thread).
          * Instead, we set a flag and initialize from the main poll thread.
@@ -2010,6 +2036,19 @@ static void bridge_on_channel_connected(void* ctx, const ChannelConnectedEventAr
             gfx->OnOpen = gfx_on_open;
         }
     }
+    else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+        CliprdrClientContext* clip = (CliprdrClientContext*)e->pInterface;
+        if (clip) {
+            clip->custom = bctx;
+            clip->ServerCapabilities = clip_on_server_caps;
+            clip->MonitorReady = clip_on_monitor_ready;
+            clip->ServerFormatList = clip_on_server_format_list;
+            clip->ServerFormatListResponse = clip_on_server_format_list_resp;
+            clip->ServerFormatDataRequest = clip_on_server_data_request;
+            clip->ServerFormatDataResponse = clip_on_server_data_response;
+            bctx->cliprdr = clip;
+        }
+    }
 }
 
 static void bridge_on_channel_disconnected(void* ctx, const ChannelDisconnectedEventArgs* e)
@@ -2037,6 +2076,9 @@ static void bridge_on_channel_disconnected(void* ctx, const ChannelDisconnectedE
         bctx->gfx_active = false;
         pthread_mutex_unlock(&bctx->gfx_mutex);
     }
+    else if (strcmp(e->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+        bctx->cliprdr = NULL;
+    }
 }
 
 static BOOL bridge_desktop_resize(rdpContext* context)
@@ -2059,6 +2101,248 @@ static BOOL bridge_desktop_resize(rdpContext* context)
      * surfaces after resize. No dirty rect tracking needed. */
     
     return TRUE;
+}
+
+/* ============================================================================
+ * Clipboard (cliprdr) - text-only bidirectional sync
+ *
+ * Remote -> local: ServerFormatList -> request CF_UNICODETEXT ->
+ *   ServerFormatDataResponse -> queue CLIPBOARD_TEXT event -> Python -> browser
+ * Local -> remote: browser pushes text via rdp_clipboard_set_text() ->
+ *   ClientFormatList(CF_UNICODETEXT) -> server requests data ->
+ *   ServerFormatDataRequest -> ClientFormatDataResponse with UTF-16LE text
+ * ============================================================================ */
+
+#define CLIP_MAX_TEXT_BYTES (1024 * 1024)
+#define CLIP_CF_UNICODETEXT 13
+#define CLIP_CF_TEXT 1
+
+static void clip_queue_text(BridgeContext* ctx, const char* utf8, uint32_t len)
+{
+    if (!ctx || !utf8 || len == 0 || len > CLIP_MAX_TEXT_BYTES) return;
+    uint8_t* copy = (uint8_t*)malloc(len + 1);
+    if (!copy) return;
+    memcpy(copy, utf8, len);
+    copy[len] = '\0';
+    RdpGfxEvent event;
+    memset(&event, 0, sizeof(event));
+    event.type = RDP_GFX_EVENT_CLIPBOARD_TEXT;
+    event.bitmap_data = copy;
+    event.bitmap_size = len;
+    gfx_queue_event(ctx, &event);
+}
+
+static UINT clip_on_server_caps(CliprdrClientContext* context, const CLIPRDR_CAPABILITIES* caps)
+{
+    if (!context || !context->ClientCapabilities) return CHANNEL_RC_OK;
+    /* Echo the server's general capability set (version + flags).
+     * Claiming flags the server didn't offer (e.g. LONG_FORMAT_NAMES)
+     * makes the server misparse our subsequent FormatList PDUs. */
+    UINT32 version = CB_CAPS_VERSION_2;
+    UINT32 flags = 0;
+    if (caps && caps->capabilitySets) {
+        BYTE* p = (BYTE*)caps->capabilitySets;
+        for (UINT32 i = 0; i < caps->cCapabilitiesSets; i++) {
+            CLIPRDR_CAPABILITY_SET* set = (CLIPRDR_CAPABILITY_SET*)p;
+            if (set->capabilitySetLength < 4) break;
+            if (set->capabilitySetType == CB_CAPSTYPE_GENERAL &&
+                set->capabilitySetLength >= CB_CAPSTYPE_GENERAL_LEN) {
+                CLIPRDR_GENERAL_CAPABILITY_SET* g = (CLIPRDR_GENERAL_CAPABILITY_SET*)p;
+                version = g->version;
+                flags = g->generalFlags;
+                break;
+            }
+            p += set->capabilitySetLength;
+        }
+    }
+    CLIPRDR_CAPABILITIES resp;
+    CLIPRDR_GENERAL_CAPABILITY_SET general;
+    memset(&resp, 0, sizeof(resp));
+    memset(&general, 0, sizeof(general));
+    resp.common.msgType = CB_CLIP_CAPS;
+    resp.cCapabilitiesSets = 1;
+    resp.capabilitySets = (CLIPRDR_CAPABILITY_SET*)&general;
+    general.capabilitySetType = CB_CAPSTYPE_GENERAL;
+    general.capabilitySetLength = CB_CAPSTYPE_GENERAL_LEN;
+    general.version = version;
+    general.generalFlags = flags;
+    return context->ClientCapabilities(context, &resp);
+}
+
+static UINT clip_on_monitor_ready(CliprdrClientContext* context, const CLIPRDR_MONITOR_READY* monitorReady)
+{
+    (void)monitorReady;
+    if (!context || !context->ClientFormatList) return CHANNEL_RC_OK;
+    /* The initial (possibly empty) FormatList completes the handshake.
+     * Without it the server never pushes FormatList updates on remote copy. */
+    CLIPRDR_FORMAT_LIST list;
+    memset(&list, 0, sizeof(list));
+    list.common.msgType = CB_FORMAT_LIST;
+    list.numFormats = 0;
+    list.formats = NULL;
+    return context->ClientFormatList(context, &list);
+}
+
+static UINT clip_on_server_format_list(CliprdrClientContext* context, const CLIPRDR_FORMAT_LIST* formatList)
+{
+    if (!context || !formatList) return CHANNEL_RC_OK;
+    CLIPRDR_FORMAT_LIST_RESPONSE resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.common.msgType = CB_FORMAT_LIST_RESPONSE;
+    resp.common.msgFlags = CB_RESPONSE_OK;
+    if (context->ClientFormatListResponse)
+        context->ClientFormatListResponse(context, &resp);
+    bool has_text = false;
+    for (UINT32 i = 0; i < formatList->numFormats; i++) {
+        if (formatList->formats[i].formatId == CLIP_CF_UNICODETEXT ||
+            formatList->formats[i].formatId == CLIP_CF_TEXT) {
+            has_text = true;
+            break;
+        }
+    }
+    if (has_text && context->ClientFormatDataRequest) {
+        CLIPRDR_FORMAT_DATA_REQUEST req;
+        memset(&req, 0, sizeof(req));
+        req.common.msgType = CB_FORMAT_DATA_REQUEST;
+        req.requestedFormatId = CLIP_CF_UNICODETEXT;
+        context->ClientFormatDataRequest(context, &req);
+    }
+    return CHANNEL_RC_OK;
+}
+
+static UINT clip_on_server_format_list_resp(CliprdrClientContext* context, const CLIPRDR_FORMAT_LIST_RESPONSE* resp)
+{
+    (void)context;
+    (void)resp;
+    return CHANNEL_RC_OK;
+}
+
+static UINT clip_on_server_data_request(CliprdrClientContext* context, const CLIPRDR_FORMAT_DATA_REQUEST* req)
+{
+    if (!context || !req || !context->ClientFormatDataResponse) return CHANNEL_RC_OK;
+    BridgeContext* ctx = (BridgeContext*)context->custom;
+    if (!ctx) return CHANNEL_RC_OK;
+    CLIPRDR_FORMAT_DATA_RESPONSE resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.common.msgType = CB_FORMAT_DATA_RESPONSE;
+    pthread_mutex_lock(&ctx->clip_mutex);
+    char* text = ctx->clip_pending_text;
+    uint32_t ulen = ctx->clip_pending_len;
+    ctx->clip_pending_text = NULL;
+    ctx->clip_pending_len = 0;
+    pthread_mutex_unlock(&ctx->clip_mutex);
+    if (!text || ulen == 0) {
+        free(text);
+        resp.common.msgFlags = CB_RESPONSE_FAIL;
+        resp.common.dataLen = 0;
+        resp.requestedFormatData = NULL;
+        return context->ClientFormatDataResponse(context, &resp);
+    }
+    size_t wlen = (ulen + 1) * 2;
+    BYTE* wbuf = (BYTE*)calloc(1, wlen);
+    if (!wbuf) {
+        free(text);
+        resp.common.msgFlags = CB_RESPONSE_FAIL;
+        return context->ClientFormatDataResponse(context, &resp);
+    }
+    size_t wi = 0;
+    for (uint32_t i = 0; i < ulen && wi + 1 < wlen; ) {
+        unsigned char c = (unsigned char)text[i];
+        uint32_t cp;
+        if (c < 0x80) { cp = c; i += 1; }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < ulen) { cp = ((c & 0x1F) << 6) | (text[i+1] & 0x3F); i += 2; }
+        else if ((c & 0xF0) == 0xE0 && i + 2 < ulen) { cp = ((c & 0x0F) << 12) | ((text[i+1] & 0x3F) << 6) | (text[i+2] & 0x3F); i += 3; }
+        else if ((c & 0xF8) == 0xF0 && i + 3 < ulen) { cp = ((c & 0x07) << 18) | ((text[i+1] & 0x3F) << 12) | ((text[i+2] & 0x3F) << 6) | (text[i+3] & 0x3F); i += 4; }
+        else { cp = '?'; i += 1; }
+        if (cp > 0xFFFF) {
+            if (wi + 3 >= wlen) break;
+            cp -= 0x10000;
+            wbuf[wi++] = (BYTE)(((cp >> 10) + 0xD800) & 0xFF);
+            wbuf[wi++] = (BYTE)((((cp >> 10) + 0xD800) >> 8) & 0xFF);
+            cp = (cp & 0x3FF) + 0xDC00;
+        }
+        if (wi + 1 >= wlen) break;
+        wbuf[wi++] = (BYTE)(cp & 0xFF);
+        wbuf[wi++] = (BYTE)((cp >> 8) & 0xFF);
+    }
+    free(text);
+    resp.common.msgFlags = CB_RESPONSE_OK;
+    resp.common.dataLen = (UINT32)wi;
+    resp.requestedFormatData = wbuf;
+    UINT ret = context->ClientFormatDataResponse(context, &resp);
+    free(wbuf);
+    return ret;
+}
+
+static UINT clip_on_server_data_response(CliprdrClientContext* context, const CLIPRDR_FORMAT_DATA_RESPONSE* resp)
+{
+    if (!context || !resp) return CHANNEL_RC_OK;
+    BridgeContext* ctx = (BridgeContext*)context->custom;
+    if (!ctx) return CHANNEL_RC_OK;
+    if ((resp->common.msgFlags & CB_RESPONSE_OK) == 0 || !resp->requestedFormatData ||
+        resp->common.dataLen == 0 || resp->common.dataLen > CLIP_MAX_TEXT_BYTES * 2) {
+        return CHANNEL_RC_OK;
+    }
+    const BYTE* src = resp->requestedFormatData;
+    UINT32 slen = resp->common.dataLen & ~1u;
+    char* out = (char*)malloc(slen * 3 / 2 + 1);
+    if (!out) return CHANNEL_RC_OK;
+    size_t oi = 0;
+    for (UINT32 i = 0; i + 1 < slen; ) {
+        uint32_t wc = src[i] | ((uint32_t)src[i+1] << 8);
+        i += 2;
+        if (wc == 0) break;
+        if (wc >= 0xD800 && wc <= 0xDBFF && i + 1 < slen) {
+            uint32_t lo = src[i] | ((uint32_t)src[i+1] << 8);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                wc = 0x10000 + ((wc - 0xD800) << 10) + (lo - 0xDC00);
+                i += 2;
+            }
+        }
+        if (wc < 0x80) out[oi++] = (char)wc;
+        else if (wc < 0x800) { out[oi++] = (char)(0xC0 | (wc >> 6)); out[oi++] = (char)(0x80 | (wc & 0x3F)); }
+        else if (wc < 0x10000) { out[oi++] = (char)(0xE0 | (wc >> 12)); out[oi++] = (char)(0x80 | ((wc >> 6) & 0x3F)); out[oi++] = (char)(0x80 | (wc & 0x3F)); }
+        else { out[oi++] = (char)(0xF0 | (wc >> 18)); out[oi++] = (char)(0x80 | ((wc >> 12) & 0x3F)); out[oi++] = (char)(0x80 | ((wc >> 6) & 0x3F)); out[oi++] = (char)(0x80 | (wc & 0x3F)); }
+    }
+    out[oi] = '\0';
+    if (oi > 0) clip_queue_text(ctx, out, (uint32_t)oi);
+    free(out);
+    return CHANNEL_RC_OK;
+}
+
+static void clip_send_local_text(BridgeContext* ctx)
+{
+    if (!ctx || !ctx->cliprdr) return;
+    CLIPRDR_FORMAT formats[1];
+    CLIPRDR_FORMAT_LIST list;
+    memset(&list, 0, sizeof(list));
+    memset(formats, 0, sizeof(formats));
+    list.common.msgType = CB_FORMAT_LIST;
+    list.numFormats = 1;
+    list.formats = formats;
+    formats[0].formatId = CLIP_CF_UNICODETEXT;
+    formats[0].formatName = NULL;
+    ctx->cliprdr->ClientFormatList(ctx->cliprdr, &list);
+}
+
+/* Public API: browser pushes text to Windows clipboard */
+int rdp_clipboard_set_text(RdpSession* session, const char* utf8_text, uint32_t len)
+{
+    if (!session || !utf8_text || len == 0 || len > CLIP_MAX_TEXT_BYTES) return -1;
+    rdpContext* context = (rdpContext*)session;
+    BridgeContext* ctx = (BridgeContext*)context;
+    if (ctx->state != RDP_STATE_CONNECTED || !ctx->cliprdr) return -1;
+    char* copy = (char*)malloc(len + 1);
+    if (!copy) return -1;
+    memcpy(copy, utf8_text, len);
+    copy[len] = '\0';
+    pthread_mutex_lock(&ctx->clip_mutex);
+    free(ctx->clip_pending_text);
+    ctx->clip_pending_text = copy;
+    ctx->clip_pending_len = len;
+    pthread_mutex_unlock(&ctx->clip_mutex);
+    clip_send_local_text(ctx);
+    return 0;
 }
 
 /* ============================================================================
@@ -3493,6 +3777,7 @@ static const char* gfx_event_type_name(int type) {
         case RDP_GFX_EVENT_VIDEO_FRAME: return "VIDEO_FRAME";
         case RDP_GFX_EVENT_EVICT_CACHE: return "EVICT_CACHE";
         case RDP_GFX_EVENT_RESET_GRAPHICS: return "RESET_GRAPHICS";
+        case RDP_GFX_EVENT_CLIPBOARD_TEXT: return "CLIPBOARD_TEXT";
         default: return "UNKNOWN";
     }
 }

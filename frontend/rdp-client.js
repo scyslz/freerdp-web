@@ -548,6 +548,7 @@ const TEMPLATE = `
             <button class="rdp-btn rdp-btn-no-wrap rdp-btn-keyboard" data-collapse-priority="never" disabled title="Toggle Virtual Keyboard">⌨️</button>
             <button class="rdp-btn rdp-btn-no-wrap rdp-btn-mute" data-collapse-priority="never" disabled title="Toggle Audio">🔊</button>
             <button class="rdp-btn rdp-btn-no-wrap rdp-btn-screenshot" data-collapse-priority="never" disabled title="Take Screenshot">📷</button>
+            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-clipboard" data-collapse-priority="never" disabled title="Push local clipboard to remote">📋</button>
             <button class="rdp-btn rdp-btn-no-wrap rdp-btn-fullscreen" data-collapse-priority="never">⛶</button>
             <div class="rdp-overflow-container">
                 <button class="rdp-btn rdp-btn-overflow" title="More options">▼</button>
@@ -773,6 +774,7 @@ export class RDPClient {
      * @param {boolean} [options.visibleTopBarButtons.keyboard=true] - Show Keyboard button
      * @param {boolean} [options.visibleTopBarButtons.mute=true] - Show Mute button
      * @param {boolean} [options.visibleTopBarButtons.screenshot=true] - Show Screenshot button
+     * @param {boolean} [options.visibleTopBarButtons.clipboard=true] - Show Clipboard button
      * @param {boolean} [options.visibleTopBarButtons.fullscreen=true] - Show Fullscreen button
      * @param {Array<{name: string, click: function}>} [options.additionalTopBarButtons=[]] - Custom buttons (max 10) added before built-in controls. Buttons collapse into overflow menu when space is limited.
      */
@@ -798,6 +800,7 @@ export class RDPClient {
                 keyboard: true,
                 mute: true,
                 screenshot: true,
+                clipboard: true,
                 fullscreen: true,
                 ...visibleTopBarButtons
             },
@@ -1004,6 +1007,7 @@ export class RDPClient {
             btnDisconnect: $('.rdp-btn-disconnect'),
             btnMute: $('.rdp-btn-mute'),
             btnScreenshot: $('.rdp-btn-screenshot'),
+            btnClipboard: $('.rdp-btn-clipboard'),
             btnFullscreen: $('.rdp-btn-fullscreen'),
             modal: $('.rdp-modal'),
             modalConnect: $('.rdp-modal-connect'),
@@ -1037,6 +1041,7 @@ export class RDPClient {
         if (!btns.keyboard) this._el.btnKeyboard.style.display = 'none';
         if (!btns.mute) this._el.btnMute.style.display = 'none';
         if (!btns.screenshot) this._el.btnScreenshot.style.display = 'none';
+        if (!btns.clipboard) this._el.btnClipboard.style.display = 'none';
         if (!btns.fullscreen) this._el.btnFullscreen.style.display = 'none';
         
         // Create additional custom buttons at the start of controls
@@ -1563,6 +1568,7 @@ export class RDPClient {
         this._el.btnMute.addEventListener('click', () => this._toggleMute());
         this._el.btnKeyboard.addEventListener('click', () => this._toggleKeyboard());
         this._el.btnScreenshot.addEventListener('click', () => this._handleScreenshotClick());
+        this._el.btnClipboard.addEventListener('click', () => this.pushClipboard());
         this._el.btnFullscreen.addEventListener('click', () => this._toggleFullscreen());
         
         // Loading area - click to open modal if not connected/connecting
@@ -2242,6 +2248,48 @@ export class RDPClient {
         }
     }
 
+    /**
+     * Push local clipboard text to the remote session
+     * Requires a secure context (HTTPS or localhost) for clipboard read
+     * @returns {Promise<boolean>} True if sent
+     */
+    async pushClipboard() {
+        if (!this._isConnected) {
+            console.warn('[RDPClient] Clipboard push: not connected');
+            return false;
+        }
+        try {
+            if (!navigator.clipboard || !navigator.clipboard.readText) {
+                console.warn('[RDPClient] Clipboard read not available (needs HTTPS or localhost)');
+                return false;
+            }
+            const text = await navigator.clipboard.readText();
+            if (!text) {
+                console.warn('[RDPClient] Clipboard push: local clipboard empty');
+                return false;
+            }
+            this._sendMessage({ type: 'clipboard', text });
+            return true;
+        } catch (err) {
+            console.warn('[RDPClient] Clipboard push failed:', err.message);
+            return false;
+        }
+    }
+
+    async _handleRemoteClipboard(text) {
+        if (!text) return;
+        try {
+            if (!navigator.clipboard || !navigator.clipboard.writeText) {
+                console.warn('[RDPClient] Clipboard write not available (needs HTTPS or localhost)');
+                return;
+            }
+            await navigator.clipboard.writeText(text);
+            this._emit('clipboard', { text });
+        } catch (err) {
+            console.warn('[RDPClient] Clipboard write failed:', err.message);
+        }
+    }
+
     _toggleFullscreen() {
         if (document.fullscreenElement) {
             document.exitFullscreen();
@@ -2333,6 +2381,9 @@ export class RDPClient {
                 case 'pong':
                     this._handlePong();
                     break;
+                case 'clipboard':
+                    this._handleRemoteClipboard(msg.text);
+                    break;
                 case 'error':
                     this._handleError(msg.message);
                     break;
@@ -2373,6 +2424,7 @@ export class RDPClient {
         this._el.btnKeyboard.disabled = false;
         this._el.btnMute.disabled = false;
         this._el.btnScreenshot.disabled = false;
+        this._el.btnClipboard.disabled = false;
         this._canvas.focus();
         
         this._initAudio();
@@ -2411,6 +2463,7 @@ export class RDPClient {
         this._el.btnKeyboard.disabled = true;
         this._el.btnMute.disabled = true;
         this._el.btnScreenshot.disabled = true;
+        this._el.btnClipboard.disabled = true;
         
         // Hide virtual keyboard on disconnect
         this.hideKeyboard();
