@@ -6,7 +6,9 @@
 # ==============================================================================
 # Stage 1: Build Progressive WASM decoder with Emscripten + pthreads
 # ==============================================================================
-FROM emscripten/emsdk:3.1.51 AS wasm-builder
+# Stage 1 runs on the build host: WASM output is platform-independent,
+# so no need (and much faster not) to emulate emsdk under QEMU for arm64.
+FROM --platform=$BUILDPLATFORM emscripten/emsdk:3.1.51 AS wasm-builder
 
 WORKDIR /build
 

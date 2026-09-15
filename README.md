@@ -43,13 +43,14 @@ It is a works for me project, but looking forward to any contributors.
 - 📸 **Screenshot capture** - Save the current remote desktop view as an image
 - 🤖 **JS-Driven automation** - Programmatic keyboard and mouse control with screenshot functionality for RPA and testing
 - 🎨 **Customizable theming** - Built-in presets (dark, light, midnight, high-contrast) and shadow dom for robustness
+- 📋 **Bidirectional clipboard** - Text sync between browser and remote session (📋 button pushes local text, remote copies auto-fill local clipboard)
+- 💾 **Remember connection** - Host, port and username saved to localStorage (password never stored)
 - 📊 Latency monitoring (ping/pong)
 - 🩺 Health check endpoint (`/health`)
 - 🐳 Docker support with multi-stage builds
 - 👥 Multi-user support (isolated RDP sessions per WebSocket connection)
 
 ## Todo (Best Effort)
-- Clipboard support (copy/paste)
 - File transfer support
 
 ## Tech Stack
@@ -101,9 +102,10 @@ docker-compose logs -f
 docker-compose down
 ```
 
-- **Frontend**: http://localhost:8000
-- **Backend WebSocket**: ws://localhost:8765
-- **Health Check**: http://localhost:8765/health
+- **Frontend**: http://localhost:8000 (nginx proxies same-origin `/ws/` to the backend, override with `BACKEND_UPSTREAM=host:8765`)
+- **Health Check**: http://localhost:8000/health
+
+> Prebuilt multi-arch images (amd64/arm64) are published to GHCR on every push to `main` via `.github/workflows/docker-publish.yml` (`freerdp-web-backend` / `freerdp-web-frontend`).
 
 ## Manual Setup
 
@@ -164,10 +166,11 @@ import { RDPClient } from './rdp-client.js';
 
 ```javascript
 const client = new RDPClient(document.getElementById('container'), {
-  wsUrl: 'ws://localhost:8765',
   showTopBar: true,    // Show/hide the connection toolbar
   showBottomBar: true  // Show/hide the status bar
 });
+// WebSocket defaults to same-origin `/ws/` (nginx proxies to backend).
+// Debug override: `?wsUrl=/custom-path` or pass `wsUrl` explicitly.
 ```
 
 #### 3. Connect programmatically
@@ -185,7 +188,7 @@ await client.connect({
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `wsUrl` | string | `'ws://localhost:8765'` | WebSocket server URL |
+| `wsUrl` | string | same-origin `/ws/` | WebSocket server URL (defaults to same-origin `/ws/` proxied by nginx; `?wsUrl=/path` overrides for debug) |
 | `showTopBar` | boolean | `true` | Show/hide the top toolbar |
 | `showBottomBar` | boolean | `true` | Show/hide the bottom status bar |
 | `reconnectDelay` | number | `3000` | Reconnection delay in milliseconds |
@@ -212,7 +215,6 @@ await client.connect({
 ```javascript
 // Example: Hide screenshot and fullscreen buttons
 const client = new RDPClient(container, {
-    wsUrl: 'ws://localhost:8765',
     visibleTopBarButtons: {
         connect: true,
         disconnect: true,
@@ -236,7 +238,6 @@ Add up to 10 custom buttons to the top bar. Buttons are inserted before the buil
 ```javascript
 // Example: Add custom buttons (remove Connect button and add Reconnect button)
 const client = new RDPClient(container, {
-    wsUrl: 'ws://localhost:8765',
     visibleTopBarButtons: {
         connect: false
     },
@@ -274,7 +275,6 @@ The security policy is **immutable by design** - it uses JavaScript private clas
 
 ```javascript
 const client = new RDPClient(container, {
-    wsUrl: 'ws://localhost:8765',
     securityPolicy: {
         allowedHostnames: ['*.internal.corp', 'rdp.example.com'],
         allowedIpv4Cidrs: ['10.0.0.0/8', '192.168.1.0/24'],
@@ -885,7 +885,6 @@ The keyboard can also be toggled using the ⌨️ button in the top toolbar when
     import { RDPClient } from './rdp-client.js';
 
     const client = new RDPClient(document.getElementById('rdp-container'), {
-      wsUrl: 'ws://localhost:8765',
       showTopBar: true,
       showBottomBar: false
     });
@@ -1041,7 +1040,7 @@ EOF
 docker run -d \
     -p 8765:8765 \
     -v $(pwd)/security:/app/security:ro \
-    qxsch/freerdpweb-backend:latest
+    ghcr.io/scyslz/freerdp-web-backend:latest
 ```
 
 Or in `docker-compose.yml`:
@@ -1049,7 +1048,7 @@ Or in `docker-compose.yml`:
 ```yaml
 services:
   backend:
-    image: qxsch/freerdpweb-backend:latest
+    image: ghcr.io/scyslz/freerdp-web-backend:latest
     ports:
       - "8765:8765"
     volumes:
@@ -1061,7 +1060,7 @@ You can also use a custom path with the environment variable:
 ```yaml
 services:
   backend:
-    image: qxsch/freerdpweb-backend:latest
+    image: ghcr.io/scyslz/freerdp-web-backend:latest
     ports:
       - "8765:8765"
     volumes:
@@ -1075,7 +1074,7 @@ services:
 Create a custom Docker image with the policy baked in:
 
 ```dockerfile
-FROM qxsch/freerdpweb-backend:latest
+FROM ghcr.io/scyslz/freerdp-web-backend:latest
 
 RUN mkdir -p /app/security/
 COPY rdp-bridge-policy.json /app/security/
@@ -1111,7 +1110,7 @@ docker run -d -p 8765:8765 my-rdp-backend
 
 ```javascript
 const client = new RDPClient(container, {
-    wsUrl: 'ws://localhost:8765',      // WebSocket server URL
+    // wsUrl defaults to same-origin `/ws/`; override only for custom setups
     mouseThrottleMs: 16,                // Mouse event throttling (~60fps)
     resizeDebounceMs: 2000,             // Resize debounce delay
 });
