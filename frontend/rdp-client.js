@@ -733,15 +733,9 @@ function getDefaultWsUrl() {
                 const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 return `${proto}//${window.location.host}${queryUrl}`;
             }
-            if (window.__RDP_WS_PATH__ && window.location?.host) {
-                const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                return `${proto}//${window.location.host}${window.__RDP_WS_PATH__}`;
-            }
             if (window.location?.host) {
                 const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const path = window.location.pathname || '/';
-                const prefix = path.startsWith('/_proxy') ? '/_proxy' : '';
-                return `${proto}//${window.location.host}${prefix}/ws/`;
+                return `${proto}//${window.location.host}/ws/`;
             }
         }
     } catch {}

@@ -6,8 +6,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: rdp-backend
-    ports:
-      - "8765:8765"
+    expose:
+      - "8765"
     environment:
       - WS_HOST=0.0.0.0
       - WS_PORT=8765
@@ -31,8 +31,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # WS path on frontend nginx (proxied to backend), e.g. /ws/ or /_proxy/ws/
-      - RDP_WS_PATH=${RDP_WS_PATH:-/ws/}
+      - BACKEND_UPSTREAM=${BACKEND_UPSTREAM:-backend:8765}
     depends_on:
       - backend
     restart: unless-stopped
