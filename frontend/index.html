@@ -10,6 +10,7 @@
     <link rel="icon" type="image/png" sizes="16x16" href="/favicons/favicon-16x16.png">
     <link rel="manifest" href="/favicons/site.webmanifest">
     <title>RDP Web Client - Demo</title>
+    <script src="./config.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
@@ -273,8 +274,8 @@ client.setTheme({
         import { RDPClient } from './rdp-client.js';
 
         // Create the RDP client instance
+        // wsUrl defaults to same-origin RDP_WS_PATH (nginx proxies to backend)
         const client = new RDPClient(document.getElementById('rdp-container'), {
-            wsUrl: 'ws://localhost:8765',
             showTopBar: true,
             showBottomBar: true,
             keepConnectionModalOpen: false

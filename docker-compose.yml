@@ -30,6 +30,9 @@ services:
     container_name: rdp-frontend
     ports:
       - "8000:8000"
+    environment:
+      # WS path on frontend nginx (proxied to backend), e.g. /ws/ or /_proxy/ws/
+      - RDP_WS_PATH=${RDP_WS_PATH:-/ws/}
     depends_on:
       - backend
     restart: unless-stopped

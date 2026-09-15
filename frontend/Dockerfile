@@ -39,6 +39,7 @@ FROM nginx:alpine
 
 # Copy static files (excluding progressive source)
 COPY index.html /usr/share/nginx/html/
+COPY config.js /usr/share/nginx/html/
 COPY rdp-*.js /usr/share/nginx/html/
 COPY wire-format.js /usr/share/nginx/html/
 COPY gfx-worker.js /usr/share/nginx/html/
@@ -64,9 +65,10 @@ COPY --from=wasm-builder /build/clearcodec/build/clearcodec_decoder.wasm /usr/sh
 
 # Custom nginx config with COOP/COEP headers
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
 # Expose HTTP port
 EXPOSE 8000
 
-# Default nginx command
-CMD ["nginx", "-g", "daemon off;"]
+ENTRYPOINT ["/docker-entrypoint.sh"]

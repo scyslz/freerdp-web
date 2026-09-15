@@ -37,6 +37,8 @@ import { RDPSecurityPolicy } from './rdp-security.js';
 // ============================================================
 const RDP_CLIENT_BASE_URL = new URL('./', import.meta.url).href;
 
+const RDP_REMEMBER_KEY = 'rdp-client:connection';
+
 // ============================================================
 // STYLES - Shadow DOM isolated styles (uses CSS custom properties for theming)
 // ============================================================
@@ -106,6 +108,27 @@ const STYLES = `
 }
 
 .rdp-topbar.hidden { display: none; }
+
+/* Fullscreen: true fullscreen - hide bars, remove padding/black borders */
+.rdp-container.fs-autohide { position: relative; }
+.rdp-container.fs-autohide .rdp-screen-wrapper {
+    padding: 0;
+}
+.rdp-container.fs-autohide .rdp-screen {
+    border: none;
+    border-radius: 0;
+}
+.rdp-container.fs-autohide .rdp-screen canvas {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    object-fit: fill;
+}
+.rdp-container.fs-autohide .rdp-topbar,
+.rdp-container.fs-autohide .rdp-bottombar {
+    display: none;
+}
 
 .rdp-status {
     display: flex;
@@ -687,6 +710,9 @@ const TEMPLATE = `
                 <label>Password</label>
                 <input type="password" class="rdp-input-pass" placeholder="Password">
             </div>
+            <div class="rdp-form-group rdp-form-checkbox">
+                <label><input type="checkbox" class="rdp-input-remember" checked> Remember host, port and username (password never stored)</label>
+            </div>
             <div class="rdp-modal-buttons">
                 <button class="rdp-btn rdp-btn-primary rdp-modal-connect">Connect</button>
                 <button class="rdp-btn rdp-modal-cancel">Cancel</button>
@@ -697,6 +723,30 @@ const TEMPLATE = `
 `;
 
 // ============================================================
+function getDefaultWsUrl() {
+    try {
+        if (typeof window !== 'undefined') {
+            const params = new URLSearchParams(window.location?.search || '');
+            const queryUrl = params.get('wsUrl') || params.get('ws');
+            if (queryUrl && queryUrl.startsWith('/')) {
+                const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                return `${proto}//${window.location.host}${queryUrl}`;
+            }
+            if (window.__RDP_WS_PATH__ && window.location?.host) {
+                const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                return `${proto}//${window.location.host}${window.__RDP_WS_PATH__}`;
+            }
+            if (window.location?.host) {
+                const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const path = window.location.pathname || '/';
+                const prefix = path.startsWith('/_proxy') ? '/_proxy' : '';
+                return `${proto}//${window.location.host}${prefix}/ws/`;
+            }
+        }
+    } catch {}
+    return 'ws://localhost:8765';
+}
+
 // RDP CLIENT CLASS
 // ============================================================
 export class RDPClient {
@@ -731,7 +781,7 @@ export class RDPClient {
         const { securityPolicy, additionalTopBarButtons, visibleTopBarButtons, ...restOptions } = options;
         
         this.options = {
-            wsUrl: 'ws://localhost:8765',
+            wsUrl: getDefaultWsUrl(),
             showTopBar: true,
             showBottomBar: true,
             reconnectDelay: 3000,
@@ -770,6 +820,8 @@ export class RDPClient {
         this._bindElements();
         this._initResponsiveToolbar();  // Setup responsive overflow handling
         this._setupEventListeners();
+        this._restoreRememberedConnection();
+        this._setupFullscreenAutohide();
         
         // Auto-show modal on init when keepConnectionModalOpen is enabled
         if (this.options.keepConnectionModalOpen) {
@@ -960,6 +1012,7 @@ export class RDPClient {
             inputPort: $('.rdp-input-port'),
             inputUser: $('.rdp-input-user'),
             inputPass: $('.rdp-input-pass'),
+            inputRemember: $('.rdp-input-remember'),
             resolution: $('.rdp-resolution'),
             latency: $('.rdp-latency'),
             // Virtual keyboard elements
@@ -2102,6 +2155,8 @@ export class RDPClient {
         this._el.modal.classList.add('active');
         // Hide cancel button when keepConnectionModalOpen is enabled
         this._el.modalCancel.style.display = this.options.keepConnectionModalOpen ? 'none' : '';
+        // Prefill remembered host/port/user (password is never stored)
+        this._restoreRememberedConnection();
         this._el.inputHost.focus();
     }
 
@@ -2124,8 +2179,50 @@ export class RDPClient {
             return;
         }
 
+        this._rememberConnection(host, port, user);
+        // Clear password field so it is never persisted in the DOM
+        this._el.inputPass.value = '';
         this._hideModal();
         this.connect({ host, port, user, pass });
+    }
+
+    _rememberConnection(host, port, user) {
+        try {
+            if (!this._el.inputRemember || !this._el.inputRemember.checked) {
+                localStorage.removeItem(RDP_REMEMBER_KEY);
+                return;
+            }
+            localStorage.setItem(RDP_REMEMBER_KEY, JSON.stringify({ host, port, user }));
+        } catch {}
+    }
+
+    _restoreRememberedConnection() {
+        try {
+            const raw = localStorage.getItem(RDP_REMEMBER_KEY);
+            if (!raw || !this._el.inputHost) return;
+            const saved = JSON.parse(raw);
+            if (saved.host) this._el.inputHost.value = saved.host;
+            if (saved.port) this._el.inputPort.value = saved.port;
+            if (saved.user) this._el.inputUser.value = saved.user;
+            if (this._el.inputPass) this._el.inputPass.value = '';
+            if (this._el.inputRemember) this._el.inputRemember.checked = true;
+        } catch {}
+    }
+
+    _setupFullscreenAutohide() {
+        this._lastFullscreenChange = 0;
+        document.addEventListener('fullscreenchange', () => {
+            this._lastFullscreenChange = Date.now();
+            if (!document.fullscreenElement) {
+                this._el.container.classList.remove('fs-autohide');
+            } else {
+                this._el.container.classList.add('fs-autohide');
+            }
+            this._handleResize();
+        });
+        document.addEventListener('fullscreenerror', () => {
+            this._el.container.classList.remove('fs-autohide');
+        });
     }
 
     _updateStatus(state, text) {
@@ -2149,6 +2246,7 @@ export class RDPClient {
         if (document.fullscreenElement) {
             document.exitFullscreen();
         } else {
+            this._el.container.classList.add('fs-autohide');
             this._container.requestFullscreen();
         }
     }
@@ -3557,11 +3655,16 @@ export class RDPClient {
 
     _handleResize() {
         if (!this._isConnected) return;
-        
+
         if (this._resizeTimeout) {
             clearTimeout(this._resizeTimeout);
         }
-        
+
+        // Fullscreen transitions fire multiple resizes during animation;
+        // wait for layout to settle so only the final size is sent
+        const sinceFullscreen = Date.now() - (this._lastFullscreenChange || 0);
+        const delay = sinceFullscreen < 600 ? 450 : this.options.resizeDebounceMs;
+
         this._resizeTimeout = setTimeout(() => {
             if (!this._isConnected) return;
             
