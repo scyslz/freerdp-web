@@ -158,10 +158,14 @@ FROM ubuntu:24.04
 # Install Python and runtime dependencies (NOT the system FreeRDP3 - we use our own)
 # Include FFmpeg runtime for AVC444→4:2:0 transcoding with VAAPI support
 # Also need X11 libs that FreeRDP3 links against even in headless mode
+# python3-dev + build tools + libffi are needed to pip-install aiortc (WebRTC DataChannel)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
+    python3-dev \
+    build-essential \
+    libffi-dev \
     libssl3 \
     libcjson1 \
     libkrb5-3 \

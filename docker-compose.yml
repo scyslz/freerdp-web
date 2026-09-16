@@ -6,12 +6,13 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: rdp-backend
-    expose:
-      - "8765"
+    network_mode: host
     environment:
       - WS_HOST=0.0.0.0
       - WS_PORT=8765
       - LOG_LEVEL=INFO
+      - RTC_STUN_URLS=${RTC_STUN_URLS:-stun:stun.miwifi.com:3478,stun:stun.l.google.com:19302}
+      - RTC_GATHER_TIMEOUT=${RTC_GATHER_TIMEOUT:-5}
       # Enable Progressive codec for browser-side WASM decoding
       # Set to 1 or true to enable, disabled by default
       # - RDP_ENABLE_PROGRESSIVE=1
@@ -31,7 +32,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - BACKEND_UPSTREAM=${BACKEND_UPSTREAM:-backend:8765}
+      # backend uses host network for WebRTC hole punching; reach it via gateway
+      - BACKEND_UPSTREAM=${BACKEND_UPSTREAM:-172.19.0.1:8765}
     depends_on:
       - backend
     restart: unless-stopped

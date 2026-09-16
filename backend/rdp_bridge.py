@@ -486,8 +486,13 @@ class RDPBridge:
     - Direct input injection (no xdotool)
     """
     
-    def __init__(self, config: RDPConfig, websocket):
+    def __init__(self, config: RDPConfig, websocket=None, sender=None):
         self.config = config
+        if sender is not None:
+            self.sender = sender
+        else:
+            from transport import WebSocketSender
+            self.sender = WebSocketSender(websocket) if websocket is not None else None
         self.websocket = websocket
         self._session: Optional[c_void_p] = None
         self._lib: Optional[NativeLibrary] = None
@@ -520,11 +525,11 @@ class RDPBridge:
                     f"Security policy blocked connection to {self.config.host}:{self.config.port} - "
                     f"{validation_result.reason}"
                 )
-                # Send error to client if websocket is available
-                if self.websocket:
+                # Send error to client if sender is available
+                if self.sender:
                     try:
                         import json
-                        await self.websocket.send(json.dumps({
+                        await self.sender.send_text(json.dumps({
                             'type': 'error',
                             'error': 'security_policy_violation',
                             'message': validation_result.reason
@@ -912,9 +917,9 @@ class RDPBridge:
                     msg = self._build_gfx_event_message(gfx_event)
                     if msg:
                         if gfx_event.type == RDP_GFX_EVENT_CLIPBOARD_TEXT:
-                            await self.websocket.send(msg.decode('utf-8'))
+                            await self.sender.send_text(msg.decode('utf-8'))
                         else:
-                            await self.websocket.send(msg)
+                            await self.sender.send_bytes(msg)
                         events_sent += 1
                     
                     # Track frame boundaries
@@ -961,16 +966,16 @@ class RDPBridge:
             finally:
                 self._session = None
         
-        # Notify WebSocket client about disconnect
-        if disconnect_reason and self.websocket:
+        # Notify client about disconnect
+        if disconnect_reason and self.sender:
             try:
-                await self.websocket.send(json.dumps({
+                await self.sender.send_text(json.dumps({
                     'type': 'disconnected',
                     'reason': disconnect_reason
                 }))
                 logger.info(f"Sent disconnect notification to client: {disconnect_reason}")
-                # Close the WebSocket to break the server's message loop
-                await self.websocket.close(1000, disconnect_reason[:120])  # WebSocket close reason max 123 bytes
+                # Close the transport to break the server's message loop
+                await self.sender.close(1000, disconnect_reason[:120])
             except Exception as e:
                 logger.debug(f"Could not send disconnect notification: {e}")
     
@@ -1053,7 +1058,7 @@ class RDPBridge:
                         message.write(struct.pack('<H', frame_size))
                         message.write(ctypes.string_at(opus_buffer, frame_size))
                         
-                        await self.websocket.send(message.getvalue())
+                        await self.sender.send_bytes(message.getvalue())
                         frames_sent += 1
                         frames_this_batch += 1
                         last_frame_time = asyncio.get_event_loop().time()

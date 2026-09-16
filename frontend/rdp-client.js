@@ -31,6 +31,7 @@
 import { resolveTheme, themeToCssVars, sanitizeTheme, fontsToCss, themes } from './rdp-themes.js';
 import { Magic, matchMagic, parsePointerPosition, parsePointerSystem, parsePointerSet } from './wire-format.js';
 import { RDPSecurityPolicy } from './rdp-security.js';
+import { WsTransport, RtcMediaTransport, getTransportModeFromQuery, getStunUrlsFromQuery, DEFAULT_STUN_URLS } from './rdp-transport.js';
 
 // ============================================================
 // BASE URL - Compute the directory containing this script for dynamic resource loading
@@ -326,6 +327,30 @@ const STYLES = `
 }
 
 .rdp-bottombar.hidden { display: none; }
+
+.rdp-transport {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--rdp-border);
+    background: rgba(255, 255, 255, 0.03);
+    white-space: nowrap;
+}
+.rdp-transport.rdp-transport-rtc {
+    color: var(--rdp-success);
+    border-color: var(--rdp-success);
+}
+.rdp-transport.rdp-transport-ws {
+    color: var(--rdp-text-muted);
+}
+.rdp-transport-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+}
 
 /* Modal */
 .rdp-modal {
@@ -689,7 +714,10 @@ const TEMPLATE = `
 
     <div class="rdp-bottombar">
         <span class="rdp-resolution">Resolution: --</span>
-        <span class="rdp-latency">Latency: --</span>
+        <span class="rdp-bottombar-right">
+            <span class="rdp-transport rdp-transport-ws"><span class="rdp-transport-dot"></span><span class="rdp-transport-text">RELAY</span></span>
+            <span class="rdp-latency">Latency: --</span>
+        </span>
     </div>
 
     <div class="rdp-modal">
@@ -922,13 +950,27 @@ export class RDPClient {
     }
 
     _initState() {
-        this._ws = null;
+        this._transport = null;
         this._isConnected = false;
         this._canvas = null;
         this._ctx = null;
         this._lastMouseSend = 0;
         this._pingStart = 0;
         this._lastLatency = null;
+        this._mediaPath = 'ws';
+        this._rtc = null;
+        this._pendingRtc = null;
+        this._latSamples = [];
+        this._pingTimer = null;
+        this._rtcLink = { candidateType: null, rttMs: null };
+        this._rtcFailCount = 0;
+        this._rtcGiveUp = false;
+        this._rtcMaxRetries = 3;
+        const queryMode = getTransportModeFromQuery();
+        this._transportMode = this.options.transportMode || queryMode || this.options.transport || 'auto';
+        if (!['ws', 'rtc', 'auto'].includes(this._transportMode)) this._transportMode = 'auto';
+        const queryStun = getStunUrlsFromQuery();
+        this._stunUrls = this.options.stunUrls || queryStun || DEFAULT_STUN_URLS;
         this._resizeTimeout = null;
         this._lastRequestedWidth = 0;
         this._lastRequestedHeight = 0;
@@ -1013,6 +1055,8 @@ export class RDPClient {
             inputRemember: $('.rdp-input-remember'),
             resolution: $('.rdp-resolution'),
             latency: $('.rdp-latency'),
+            transport: $('.rdp-transport'),
+            transportText: $('.rdp-transport-text'),
             // Virtual keyboard elements
             btnKeyboard: $('.rdp-btn-keyboard'),
             keyboardOverlay: $('.rdp-keyboard-overlay'),
@@ -1431,9 +1475,9 @@ export class RDPClient {
                 break;
                 
             case 'frameAck':
-                // Send frame acknowledgment back to server
-                if (this._ws && this._ws.readyState === WebSocket.OPEN && msg.data) {
-                    this._ws.send(msg.data);
+                // Send frame acknowledgment back to server (RTC control DC preferred)
+                if (msg.data) {
+                    this._sendBinary(msg.data);
                 }
                 break;
                 
@@ -1620,7 +1664,7 @@ export class RDPClient {
      */
     connect(credentials) {
         return new Promise((resolve, reject) => {
-            if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+            if (this._transport && this._transport.isOpen()) {
                 reject(new Error('Already connected'));
                 return;
             }
@@ -1648,10 +1692,9 @@ export class RDPClient {
             this._updateStatus('connecting', 'Connecting...');
             this._el.loading.querySelector('p').textContent = 'Connecting...';
 
-            this._ws = new WebSocket(this.options.wsUrl);
-            this._ws.binaryType = 'arraybuffer';
-
-            this._ws.onopen = () => {
+            const transport = new WsTransport(this.options.wsUrl);
+            this._transport = transport;
+            transport.onopen = () => {
                 const { width, height } = this._getAvailableDimensions();
                 this._lastRequestedWidth = width;
                 this._lastRequestedHeight = height;
@@ -1667,19 +1710,25 @@ export class RDPClient {
                     width,
                     height
                 });
-                
+
                 console.log('[RDPClient] Connect request to', credentials.host + ':' + (credentials.port || 3389));
             };
 
-            this._ws.onmessage = (e) => this._handleMessage(e);
-            this._ws.onerror = (e) => {
+            transport.onmessage = (e) => this._handleMessage(e);
+            transport.onerror = (e) => {
                 this._updateStatus('error', 'Connection error');
                 if (this._pendingConnect) {
-                    this._pendingConnect.reject(new Error('WebSocket error'));
+                    this._pendingConnect.reject(new Error('Transport error'));
                     this._pendingConnect = null;
                 }
             };
-            this._ws.onclose = () => this._handleDisconnect();
+            transport.onclose = () => this._handleDisconnect();
+            transport.connect().catch((e) => {
+                if (this._pendingConnect) {
+                    this._pendingConnect.reject(e instanceof Error ? e : new Error('Transport error'));
+                    this._pendingConnect = null;
+                }
+            });
         });
     }
 
@@ -1689,8 +1738,8 @@ export class RDPClient {
      */
     disconnect() {
         return new Promise((resolve) => {
-            // If already disconnected or no WebSocket, resolve immediately
-            if (!this._ws || this._ws.readyState === WebSocket.CLOSED) {
+            // If already disconnected or no transport, resolve immediately
+            if (!this._transport || this._transport.isClosed()) {
                 if (this._isConnected) {
                     this._handleDisconnect();
                 }
@@ -1712,9 +1761,9 @@ export class RDPClient {
             
             // Send disconnect message to server
             this._sendMessage({ type: 'disconnect' });
-            
-            // Close WebSocket (will trigger onclose -> _handleDisconnect)
-            this._ws.close();
+
+            // Close transport (will trigger onclose -> _handleDisconnect)
+            this._transport.close();
             
             // Timeout fallback - force cleanup after 3 seconds
             this._disconnectTimeout = setTimeout(() => {
@@ -2298,8 +2347,249 @@ export class RDPClient {
     // --------------------------------------------------
 
     _sendMessage(msg) {
-        if (this._ws && this._ws.readyState === WebSocket.OPEN) {
-            this._ws.send(JSON.stringify(msg));
+        this._transport?.sendJson(msg);
+    }
+
+    _sendBinary(data) {
+        if (!data) return false;
+        if (this._mediaPath === 'rtc' && this._rtc) {
+            if (this._rtc.sendControl(data)) return true;
+        }
+        if (this._transport?.isOpen()) {
+            this._transport.sendBytes(data);
+            return true;
+        }
+        return false;
+    }
+
+    getTransportInfo() {
+        return {
+            mode: this._transportMode,
+            mediaPath: this._mediaPath,
+            latencyMs: this._lastLatency,
+            rtcConnected: !!this._rtc?.isOpen(),
+            candidateType: this._rtcLink?.candidateType || null,
+            rtcRttMs: this._rtcLink?.rttMs ?? null,
+        };
+    }
+
+    _updateTransportBadge() {
+        if (!this._el?.transport || !this._el?.transportText) return;
+        const badge = this._el.transport;
+        const text = this._el.transportText;
+        let label = 'RELAY';
+        let cls = 'rdp-transport rdp-transport-ws';
+        let title = 'Media over WebSocket relay';
+        if (this._mediaPath === 'rtc') {
+            const nat = (this._rtcLink?.candidateType || '').toLowerCase();
+            if (nat === 'host') {
+                label = 'P2P';
+                title = 'WebRTC P2P direct (host candidate)';
+            } else if (nat === 'srflx') {
+                label = 'P2P · STUN';
+                title = 'WebRTC P2P via STUN (server reflexive)';
+            } else {
+                label = 'P2P · RTC';
+                title = 'WebRTC DataChannel media path';
+            }
+            cls = 'rdp-transport rdp-transport-rtc';
+        } else if (this._mediaPath === 'rtc-pending') {
+            label = 'P2P…';
+            title = 'WebRTC handshake in progress, media still on WS';
+        }
+        badge.className = cls;
+        text.textContent = label;
+        badge.title = title;
+    }
+
+    _recordLatency(latency) {
+        this._lastLatency = latency;
+        this._el.latency.textContent = `Latency: ${latency}ms`;
+        this._updateTransportBadge();
+        this._emit('latency', { latencyMs: latency, transport: this._mediaPath });
+        this._latSamples.push(latency);
+        if (this._latSamples.length > 12) this._latSamples.shift();
+        this._maybeAutoSwitch();
+    }
+
+    _maybeAutoSwitch() {
+        if (this._transportMode !== 'auto' || !this._isConnected) return;
+        if (this._latSamples.length < 3) return;
+        const avg = this._latSamples.reduce((a, b) => a + b, 0) / this._latSamples.length;
+        if (this._mediaPath === 'ws' && !this._rtc && !this._pendingRtc && !this._rtcGiveUp) {
+            if (this._latSamples.length >= 6 && avg > 400) return;
+            console.log(`[RDPClient] Probing RTC (ws avg ${Math.round(avg)}ms)`);
+            this._probeRtc();
+        }
+    }
+
+    _noteRtcFailed(reason) {
+        this._rtcFailCount += 1;
+        console.warn(`[RDPClient] RTC probe failed (${reason}), attempt ${this._rtcFailCount}/${this._rtcMaxRetries}`);
+        try { this._sendMessage({ type: 'rtc-downgrade' }); } catch {}
+        if (this._rtcFailCount >= this._rtcMaxRetries) {
+            this._rtcGiveUp = true;
+            console.warn('[RDPClient] RTC giving up for this session, staying on WS relay');
+            this._updateTransportBadge();
+        }
+    }
+
+    async _probeRtc() {
+        if (this._rtc || this._pendingRtc || this._rtcGiveUp || !this._transport?.isOpen()) return;
+        const rtc = new RtcMediaTransport(this._transport, {
+            stunUrls: this._stunUrls,
+            timeoutMs: this.options.rtcTimeoutMs || 10000,
+        });
+        this._pendingRtc = rtc;
+        rtc.onmedia = (e) => this._handleMessage(e);
+        rtc.onstate = (st) => {
+            if (st === 'open') this._upgradeToRtc(rtc);
+            else if (st === 'failed' || st === 'disconnected' || st === 'closed') {
+                if (this._pendingRtc === rtc) {
+                    this._pendingRtc = null;
+                    this._noteRtcFailed(st);
+                }
+                try { rtc.close(); } catch {}
+            }
+        };
+        rtc.onerror = () => {
+            if (this._pendingRtc === rtc) {
+                this._pendingRtc = null;
+                this._noteRtcFailed('error');
+            }
+            try { rtc.close(); } catch {}
+        };
+        try {
+            await rtc.start();
+        } catch {
+            if (this._pendingRtc === rtc) {
+                this._pendingRtc = null;
+                this._noteRtcFailed('start-error');
+            }
+            try { rtc.close(); } catch {}
+        }
+    }
+
+    _upgradeToRtc(rtc) {
+        if (!this._isConnected) {
+            try { rtc.close(); } catch {}
+            if (this._pendingRtc === rtc) this._pendingRtc = null;
+            return;
+        }
+        this._rtc = rtc;
+        this._pendingRtc = null;
+        this._mediaPath = 'rtc-pending';
+        this._rtcLink = { candidateType: null, rttMs: null };
+        this._updateTransportBadge();
+        rtc.onstate = (st) => {
+            if (st === 'disconnected' || st === 'closed' || st === 'media-closed' || st === 'control-closed') {
+                this._downgradeToWs(`dc-${st}`);
+            } else if (st === 'failed') {
+                this._downgradeToWs('rtc-failed');
+            }
+        };
+        rtc.onerror = () => this._downgradeToWs('rtc-error');
+        this._sendMessage({ type: 'rtc-upgrade' });
+        console.log('[RDPClient] RTC DC open, media upgrading to RTC');
+    }
+
+    async _refreshRtcLink() {
+        if (!this._rtc) return;
+        try {
+            const info = await this._rtc.getSelectedCandidateInfo();
+            if (info) {
+                this._rtcLink = { candidateType: info.candidateType, rttMs: info.rttMs };
+                this._updateTransportBadge();
+                if (typeof info.rttMs === 'number') {
+                    this._lastLatency = info.rttMs;
+                    this._el.latency.textContent = `Latency: ${info.rttMs}ms (P2P)`;
+                    this._emit('latency', { latencyMs: info.rttMs, transport: 'rtc' });
+                }
+            }
+        } catch {}
+    }
+
+    _confirmMediaPath(path) {
+        this._mediaPath = path;
+        this._latSamples = [];
+        if (path === 'rtc') {
+            this._rtcFailCount = 0;
+            this._rtcGiveUp = false;
+        }
+        console.log(`[RDPClient] Media path confirmed: ${path}`);
+        this._updateTransportBadge();
+        if (path === 'rtc') {
+            this._refreshRtcLink();
+        } else {
+            this._rtcLink = { candidateType: null, rttMs: null };
+            this._updateTransportBadge();
+        }
+        this._emit('transport', { mediaPath: path, mode: this._transportMode });
+        if (path === 'ws' && this._transportMode === 'rtc' && !this._rtc) {
+            console.warn('[RDPClient] RTC requested but unavailable, staying on WS');
+        }
+    }
+
+    _downgradeToWs(reason) {
+        if (this._pendingRtc) {
+            try { this._pendingRtc.close(); } catch {}
+            this._pendingRtc = null;
+        }
+        if (this._mediaPath === 'ws') {
+            if (this._rtc) {
+                try { this._rtc.close(); } catch {}
+                this._rtc = null;
+            }
+            return;
+        }
+        console.warn(`[RDPClient] Downgrading media to WS (${reason})`);
+        try { this._sendMessage({ type: 'rtc-downgrade' }); } catch {}
+        if (this._rtc) {
+            try { this._rtc.close(); } catch {}
+            this._rtc = null;
+        }
+        this._mediaPath = 'ws';
+        this._latSamples = [];
+        this._rtcLink = { candidateType: null, rttMs: null };
+        this._updateTransportBadge();
+        this._emit('transport', { mediaPath: 'ws', mode: this._transportMode, reason });
+    }
+
+    _handleRtcSignal(msg) {
+        const rtc = this._pendingRtc ?? this._rtc;
+        switch (msg.type) {
+            case 'rtc-answer':
+                rtc?.handleAnswer(msg.sdp);
+                break;
+            case 'rtc-ice':
+                rtc?.handleRemoteIce(msg.candidate);
+                break;
+            case 'rtc-active':
+                if (msg.transport === 'rtc' && this._rtc) {
+                    this._confirmMediaPath('rtc');
+                } else {
+                    if (this._rtc) {
+                        try { this._rtc.close(); } catch {}
+                        this._rtc = null;
+                    }
+                    if (this._pendingRtc) {
+                        try { this._pendingRtc.close(); } catch {}
+                        this._pendingRtc = null;
+                    }
+                    this._confirmMediaPath('ws');
+                }
+                break;
+            case 'rtc-unavailable':
+                if (this._rtc) {
+                    try { this._rtc.close(); } catch {}
+                    this._rtc = null;
+                }
+                if (this._pendingRtc) {
+                    try { this._pendingRtc.close(); } catch {}
+                    this._pendingRtc = null;
+                }
+                this._confirmMediaPath('ws');
+                break;
         }
     }
 
@@ -2378,6 +2668,12 @@ export class RDPClient {
                 case 'clipboard':
                     this._handleRemoteClipboard(msg.text);
                     break;
+                case 'rtc-answer':
+                case 'rtc-ice':
+                case 'rtc-active':
+                case 'rtc-unavailable':
+                    this._handleRtcSignal(msg);
+                    break;
                 case 'error':
                     this._handleError(msg.message);
                     break;
@@ -2410,6 +2706,10 @@ export class RDPClient {
 
     _handleConnected(msg) {
         this._isConnected = true;
+        this._mediaPath = 'ws';
+        this._latSamples = [];
+        this._rtcLink = { candidateType: null, rttMs: null };
+        this._updateTransportBadge();
         this._updateStatus('connected', 'Connected');
         this._el.canvas.style.display = 'block';
         this._el.loading.style.display = 'none';
@@ -2420,20 +2720,26 @@ export class RDPClient {
         this._el.btnScreenshot.disabled = false;
         this._el.btnClipboard.disabled = false;
         this._canvas.focus();
-        
+
         this._initAudio();
 
         if (msg.width && msg.height) {
             this._handleServerResize(msg.width, msg.height);
         }
-        
+
         // Initialize GFX worker with canvas
         // Note: We only transfer canvas control on connect, not earlier,
         // because the canvas dimensions need to match the session size
-        this._initGfxWorkerCanvas(msg.width || this._canvas.width, 
+        this._initGfxWorkerCanvas(msg.width || this._canvas.width,
                                   msg.height || this._canvas.height);
 
-        setInterval(() => this._sendPing(), 5000);
+        if (this._pingTimer) clearInterval(this._pingTimer);
+        this._pingTimer = setInterval(() => this._sendPing(), 5000);
+        this._rtcFailCount = 0;
+        this._rtcGiveUp = false;
+        if (this._transportMode !== 'ws') {
+            setTimeout(() => this._probeRtc(), 1500);
+        }
         
         this._emit('connected', { width: msg.width, height: msg.height });
         
@@ -2445,7 +2751,23 @@ export class RDPClient {
 
     _handleDisconnect() {
         this._isConnected = false;
-        this._ws = null;
+        this._transport = null;
+        if (this._rtc) {
+            try { this._rtc.close(); } catch {}
+            this._rtc = null;
+        }
+        if (this._pendingRtc) {
+            try { this._pendingRtc.close(); } catch {}
+            this._pendingRtc = null;
+        }
+        this._mediaPath = 'ws';
+        this._latSamples = [];
+        this._rtcLink = { candidateType: null, rttMs: null };
+        this._updateTransportBadge();
+        if (this._pingTimer) {
+            clearInterval(this._pingTimer);
+            this._pingTimer = null;
+        }
         this._lastRequestedWidth = 0;
         this._lastRequestedHeight = 0;
         this._updateStatus('disconnected', 'Disconnected');
@@ -2532,14 +2854,14 @@ export class RDPClient {
         this._emit('error', { message });
         
         // If we have a pending connect promise (connection attempt failed),
-        // reject it and close the WebSocket to allow retry
+        // reject it and close the transport to allow retry
         if (this._pendingConnect) {
             this._pendingConnect.reject(new Error(message));
             this._pendingConnect = null;
-            
-            // Close the WebSocket to allow reconnection attempts
-            if (this._ws) {
-                this._ws.close();
+
+            // Close the transport to allow reconnection attempts
+            if (this._transport) {
+                this._transport.close();
                 // Note: _handleDisconnect will be called by onclose handler
             }
         }
@@ -2547,17 +2869,19 @@ export class RDPClient {
     }
 
     _sendPing() {
-        if (this._isConnected) {
-            this._pingStart = performance.now();
-            this._sendMessage({ type: 'ping' });
+        if (!this._isConnected) return;
+        if (this._mediaPath === 'rtc' && this._rtc) {
+            this._refreshRtcLink();
+            return;
         }
+        this._pingStart = performance.now();
+        this._sendMessage({ type: 'ping' });
     }
 
     _handlePong() {
+        if (this._mediaPath === 'rtc') return;
         const latency = Math.round(performance.now() - this._pingStart);
-        this._lastLatency = latency;
-        this._el.latency.textContent = `Latency: ${latency}ms`;
-        this._emit('latency', { latencyMs: latency });
+        this._recordLatency(latency);
     }
 
     // --------------------------------------------------

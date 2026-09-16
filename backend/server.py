@@ -16,7 +16,9 @@ from websockets.http11 import Response
 from websockets.datastructures import Headers
 
 from rdp_bridge import RDPBridge, RDPConfig, NativeLibrary
-from wire_format import parse_frame_ack, get_message_type, Magic
+from wire_format import parse_frame_ack, get_message_type, Magic, build_reset_graphics
+from transport import WebSocketSender
+from webrtc_transport import WebRTCManager, is_available as webrtc_available
 
 # Load environment variables
 load_dotenv()
@@ -65,6 +67,29 @@ websockets_logger.addFilter(WebSocketErrorFilter())
 
 # Active sessions: websocket -> RDPBridge
 sessions: Dict[ServerConnection, RDPBridge] = {}
+
+# One WebRTC manager for all signaling sockets (STUN only, WS fallback)
+rtc_manager = WebRTCManager()
+
+# client_id -> RDPBridge for DataChannel control routing
+_rtc_bridges: Dict[int, RDPBridge] = {}
+
+
+async def handle_control_bytes(client_id: int, data: bytes):
+    """Route DataChannel 'control' binary (FACK) to the RDP bridge."""
+    bridge = _rtc_bridges.get(client_id)
+    if bridge is None:
+        # Fall back to WS sessions lookup
+        for ws, b in list(sessions.items()):
+            if id(ws) == client_id:
+                bridge = b
+                break
+    if bridge is None:
+        return
+    await handle_binary_message(data, bridge, client_id)
+
+
+rtc_manager.on_control_bytes = handle_control_bytes
 
 # HTML response for non-WebSocket requests
 INFO_PAGE_HTML = """<!DOCTYPE html>
@@ -215,10 +240,10 @@ async def handle_binary_message(data: bytes, rdp_bridge: Optional[RDPBridge], cl
 
 
 async def handle_client(websocket: ServerConnection):
-    """Handle a WebSocket client connection"""
+    """Handle a WebSocket client connection (signaling + WS fallback transport)"""
     client_id = id(websocket)
     logger.info(f"Client {client_id} connected from {websocket.remote_address}")
-    
+
     rdp_bridge: Optional[RDPBridge] = None
     
     try:
@@ -251,7 +276,7 @@ async def handle_client(websocket: ServerConnection):
                         height=data.get('height', 720)
                     )
                     
-                    rdp_bridge = RDPBridge(config, websocket)
+                    rdp_bridge = RDPBridge(config, websocket, sender=WebSocketSender(websocket))
                     sessions[websocket] = rdp_bridge
                     
                     # Start the RDP session (this will begin streaming frames)
@@ -342,7 +367,67 @@ async def handle_client(websocket: ServerConnection):
                     # Just log for debugging
                     frame_id = data.get('frame_id', 0)
                     logger.debug(f"Frame ack received: {frame_id}")
-                
+
+                elif msg_type == 'rtc-offer':
+                    sdp = data.get('sdp', '')
+                    if not sdp:
+                        await websocket.send(json.dumps({'type': 'error', 'message': 'Missing SDP offer'}))
+                    elif not webrtc_available():
+                        await websocket.send(json.dumps({'type': 'rtc-unavailable', 'reason': 'aiortc not installed'}))
+                    else:
+                        answer = await rtc_manager.handle_offer(client_id, sdp, websocket)
+                        if answer:
+                            try:
+                                await websocket.send(json.dumps({'type': 'rtc-answer', 'sdp': answer}))
+                            except Exception:
+                                pass
+
+                elif msg_type == 'rtc-ice':
+                    await rtc_manager.handle_remote_ice(client_id, data.get('candidate'))
+
+                elif msg_type == 'rtc-upgrade':
+                    # Client says DC is open: switch media sender to DataChannel.
+                    # Send RSGR first on the new channel so the client resyncs
+                    # cleanly (WS and DC have different latencies; mixed order
+                    # would corrupt the frame stream).
+                    if rdp_bridge and rtc_manager.has_session(client_id):
+                        sender = rtc_manager.get_media_sender(client_id)
+                        if sender is not None:
+                            rdp_bridge.sender = sender
+                            _rtc_bridges[client_id] = rdp_bridge
+                            try:
+                                await sender.send_bytes(
+                                    build_reset_graphics(rdp_bridge.config.width,
+                                                         rdp_bridge.config.height))
+                            except Exception:
+                                pass
+                            logger.info(f"Client {client_id}: media upgraded to RTC DataChannel")
+                            await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'rtc'}))
+                        else:
+                            await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'ws'}))
+                    else:
+                        await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'ws'}))
+
+                elif msg_type == 'rtc-downgrade':
+                    # Client asks to fall back: switch media sender back to WS
+                    # and close the RTC session so aiortc stops ICE retries.
+                    if rdp_bridge:
+                        ws_sender = WebSocketSender(websocket)
+                        rdp_bridge.sender = ws_sender
+                        _rtc_bridges.pop(client_id, None)
+                        try:
+                            await ws_sender.send_bytes(
+                                build_reset_graphics(rdp_bridge.config.width,
+                                                     rdp_bridge.config.height))
+                        except Exception:
+                            pass
+                        logger.info(f"Client {client_id}: media downgraded to WS")
+                    try:
+                        await rtc_manager.close(client_id)
+                    except Exception:
+                        pass
+                    await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'ws'}))
+
                 else:
                     logger.warning(f"Unknown message type: {msg_type}")
                     
@@ -366,6 +451,11 @@ async def handle_client(websocket: ServerConnection):
             await rdp_bridge.disconnect()
         if websocket in sessions:
             del sessions[websocket]
+        _rtc_bridges.pop(client_id, None)
+        try:
+            await rtc_manager.close(client_id)
+        except Exception:
+            pass
         logger.info(f"Client {client_id} disconnected")
 
 
