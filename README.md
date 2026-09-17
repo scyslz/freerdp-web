@@ -35,6 +35,8 @@ It is a works for me project, but looking forward to any contributors.
 - 🎨 **ClearCodec WASM decoder** - Clear codec tiles decoded in WebAssembly
 - 🔊 **Low-latency audio** with AudioWorklet + SharedArrayBuffer ring buffer (~5-20ms latency)
 - 🎵 Native audio streaming with Opus encoding (per-session isolation)
+- 📡 **WebRTC DataChannel transport** - P2P/STUN/TURN media path with WS relay fallback (`RTC_STUN_URLS` / `RTC_TURN_URLS` / `RTC_TURN_USER` / `RTC_TURN_PASS`)
+- 🤖 **AUTO route switching** - Dual-side stability gate (bad current + stable peer + 15% margin + 15s cooldown), toolbar `AUTO / WebRTC / RELAY` switcher
 - ⌨️ Full keyboard support with scan code translation
 - ⌨️ **Virtual on-screen keyboard** - Touch-friendly US layout with modifier support
 - 🖱️ Mouse support (move, click, drag, wheel - horizontal & vertical)
