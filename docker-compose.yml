@@ -2,11 +2,13 @@ version: '3.8'
 
 services:
   backend:
+    image: ghcr.io/scyslz/freerdp-web-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: rdp-backend
-    network_mode: host
+    ports:
+      - "8765:8765"
     environment:
       - WS_HOST=0.0.0.0
       - WS_PORT=8765
@@ -28,6 +30,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    image: ghcr.io/scyslz/freerdp-web-frontend:latest
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -35,8 +38,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # backend uses host network for WebRTC hole punching; reach it via gateway
-      - BACKEND_UPSTREAM=${BACKEND_UPSTREAM:-172.19.0.1:8765}
+      - BACKEND_UPSTREAM=${BACKEND_UPSTREAM:-backend:8765}
     depends_on:
       - backend
     restart: unless-stopped

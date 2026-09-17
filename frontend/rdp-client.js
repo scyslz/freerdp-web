@@ -169,6 +169,7 @@ const STYLES = `
 .rdp-btn:hover { background: var(--rdp-btn-hover); }
 .rdp-btn:active { background: var(--rdp-btn-active-bg); color: var(--rdp-btn-active-text); }
 .rdp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.rdp-btn-reconnect.on { background: var(--rdp-btn-active-bg); color: var(--rdp-btn-active-text); }
 
 /* Overflow Menu */
 .rdp-overflow-container {
@@ -624,6 +625,7 @@ const TEMPLATE = `
         <div class="rdp-controls">
             <button class="rdp-btn rdp-btn-no-wrap rdp-btn-connect" data-collapse-priority="1">Connect</button>
             <button class="rdp-btn rdp-btn-no-wrap rdp-btn-disconnect" data-collapse-priority="2" disabled>Disconnect</button>
+            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-reconnect" data-collapse-priority="3" title="Auto reconnect on disconnect">Reconnect: Off</button>
             <button class="rdp-btn rdp-btn-no-wrap rdp-btn-keyboard" data-collapse-priority="never" disabled title="Toggle Virtual Keyboard">⌨️</button>
             <button class="rdp-btn rdp-btn-no-wrap rdp-btn-mute" data-collapse-priority="never" disabled title="Toggle Audio">🔊</button>
             <button class="rdp-btn rdp-btn-no-wrap rdp-btn-screenshot" data-collapse-priority="never" disabled title="Take Screenshot">📷</button>
@@ -795,7 +797,7 @@ const TEMPLATE = `
                 <input type="password" class="rdp-input-pass" placeholder="Password">
             </div>
             <div class="rdp-form-group rdp-form-checkbox">
-                <label><input type="checkbox" class="rdp-input-remember" checked> Remember host, port and username (password never stored)</label>
+                <label><input type="checkbox" class="rdp-input-remember" checked> Remember</label>
             </div>
             <div class="rdp-modal-buttons">
                 <button class="rdp-btn rdp-btn-primary rdp-modal-connect">Connect</button>
@@ -838,7 +840,9 @@ export class RDPClient {
      * @param {string} [options.wsUrl='ws://localhost:8765'] - WebSocket server URL
      * @param {boolean} [options.showTopBar=true] - Show top toolbar
      * @param {boolean} [options.showBottomBar=true] - Show bottom status bar
-     * @param {number} [options.reconnectDelay=3000] - Reconnection delay in ms
+     * @param {number} [options.reconnectDelay=10000] - Reconnection delay in ms
+     * @param {number} [options.reconnectMaxAttempts=3] - Max auto reconnect attempts
+     * @param {boolean} [options.autoReconnect=false] - Auto reconnect on disconnect
      * @param {boolean} [options.keepConnectionModalOpen=false] - Keep connection modal open when disconnected (cannot be closed)
      * @param {boolean} [options.loadingSpinnerOpensModal=true] - Whether clicking the loading area opens the connection modal
      * @param {number} [options.minWidth=0] - Minimum canvas width in pixels (0 = no minimum, scrollbar appears if container is smaller)
@@ -863,7 +867,6 @@ export class RDPClient {
             wsUrl: getDefaultWsUrl(),
             showTopBar: true,
             showBottomBar: true,
-            reconnectDelay: 3000,
             mouseThrottleMs: 16,
             resizeDebounceMs: 2000,
             keepConnectionModalOpen: false,
@@ -874,6 +877,7 @@ export class RDPClient {
             visibleTopBarButtons: {
                 connect: true,
                 disconnect: true,
+                reconnect: true,
                 keyboard: true,
                 mute: true,
                 screenshot: true,
@@ -881,6 +885,9 @@ export class RDPClient {
                 fullscreen: true,
                 ...visibleTopBarButtons
             },
+            autoReconnect: false,
+            reconnectDelay: 10000,
+            reconnectMaxAttempts: 3,
             ...restOptions
         };
         
@@ -1050,6 +1057,8 @@ export class RDPClient {
         this._routeTimer = null;
         this._routeIntervalMs = this.options.routeIntervalMs || 30000;
         this._keepaliveMs = this.options.keepaliveMs || 20000;
+        this._lastAutoSwitchAt = 0;
+        this._autoCooldownMs = this.options.autoCooldownMs || 15000;
         this._resizeTimeout = null;
         this._lastRequestedWidth = 0;
         this._lastRequestedHeight = 0;
@@ -1106,6 +1115,11 @@ export class RDPClient {
         // Disconnect state
         this._pendingDisconnect = null;
         this._disconnectTimeout = null;
+        this._autoReconnect = !!this.options.autoReconnect;
+        this._reconnectTimer = null;
+        this._reconnectAttempts = 0;
+        this._manualDisconnect = false;
+        this._lastCredentials = null;
     }
 
     _bindElements() {
@@ -1120,6 +1134,7 @@ export class RDPClient {
             statusText: $('.rdp-status-text'),
             btnConnect: $('.rdp-btn-connect'),
             btnDisconnect: $('.rdp-btn-disconnect'),
+            btnReconnect: $('.rdp-btn-reconnect'),
             btnMute: $('.rdp-btn-mute'),
             btnScreenshot: $('.rdp-btn-screenshot'),
             btnClipboard: $('.rdp-btn-clipboard'),
@@ -1156,6 +1171,7 @@ export class RDPClient {
         const btns = this.options.visibleTopBarButtons;
         if (!btns.connect) this._el.btnConnect.style.display = 'none';
         if (!btns.disconnect) this._el.btnDisconnect.style.display = 'none';
+        if (!btns.reconnect && this._el.btnReconnect) this._el.btnReconnect.style.display = 'none';
         if (!btns.keyboard) this._el.btnKeyboard.style.display = 'none';
         if (!btns.mute) this._el.btnMute.style.display = 'none';
         if (!btns.screenshot) this._el.btnScreenshot.style.display = 'none';
@@ -1683,6 +1699,8 @@ export class RDPClient {
         // UI buttons
         this._el.btnConnect.addEventListener('click', () => this._showModal());
         this._el.btnDisconnect.addEventListener('click', () => this.disconnect());
+        if (this._el.btnReconnect) this._el.btnReconnect.addEventListener('click', () => this.setAutoReconnect(!this._autoReconnect));
+        this._updateReconnectBtn();
         this._el.btnMute.addEventListener('click', () => this._toggleMute());
         this._el.btnKeyboard.addEventListener('click', () => this._toggleKeyboard());
         this._el.btnScreenshot.addEventListener('click', () => this._handleScreenshotClick());
@@ -1755,7 +1773,7 @@ export class RDPClient {
      * @param {string} credentials.pass - Password
      * @returns {Promise<void>}
      */
-    connect(credentials) {
+    connect(credentials, opts = {}) {
         return new Promise((resolve, reject) => {
             if (this._transport && this._transport.isOpen()) {
                 reject(new Error('Already connected'));
@@ -1782,6 +1800,12 @@ export class RDPClient {
             }
 
             this._pendingConnect = { resolve, reject };
+            this._manualDisconnect = false;
+            if (!opts || !opts._retry) {
+                this._reconnectAttempts = 0;
+                this._clearReconnectTimer();
+            }
+            this._lastCredentials = { ...credentials };
             this._updateStatus('connecting', 'Connecting...');
             this._el.loading.querySelector('p').textContent = 'Connecting...';
 
@@ -1831,6 +1855,8 @@ export class RDPClient {
      */
     disconnect() {
         return new Promise((resolve) => {
+            this._manualDisconnect = true;
+            this._clearReconnectTimer();
             // If already disconnected or no transport, resolve immediately
             if (!this._transport || this._transport.isClosed()) {
                 if (this._isConnected) {
@@ -2269,6 +2295,8 @@ export class RDPClient {
      * @returns {Promise<void>} Resolves when destruction is complete
      */
     async destroy() {
+        this._manualDisconnect = true;
+        this._clearReconnectTimer();
         await this.disconnect();
         if (this._gfxWorker) {
             this._gfxWorker.terminate();
@@ -2297,7 +2325,7 @@ export class RDPClient {
         this._el.modal.classList.add('active');
         // Hide cancel button when keepConnectionModalOpen is enabled
         this._el.modalCancel.style.display = this.options.keepConnectionModalOpen ? 'none' : '';
-        // Prefill remembered host/port/user (password is never stored)
+        // Prefill remembered connection
         this._restoreRememberedConnection();
         this._el.inputHost.focus();
     }
@@ -2321,20 +2349,18 @@ export class RDPClient {
             return;
         }
 
-        this._rememberConnection(host, port, user);
-        // Clear password field so it is never persisted in the DOM
-        this._el.inputPass.value = '';
+        this._rememberConnection(host, port, user, pass);
         this._hideModal();
         this.connect({ host, port, user, pass });
     }
 
-    _rememberConnection(host, port, user) {
+    _rememberConnection(host, port, user, pass) {
         try {
             if (!this._el.inputRemember || !this._el.inputRemember.checked) {
                 localStorage.removeItem(RDP_REMEMBER_KEY);
                 return;
             }
-            localStorage.setItem(RDP_REMEMBER_KEY, JSON.stringify({ host, port, user }));
+            localStorage.setItem(RDP_REMEMBER_KEY, JSON.stringify({ host, port, user, pass }));
         } catch {}
     }
 
@@ -2346,7 +2372,7 @@ export class RDPClient {
             if (saved.host) this._el.inputHost.value = saved.host;
             if (saved.port) this._el.inputPort.value = saved.port;
             if (saved.user) this._el.inputUser.value = saved.user;
-            if (this._el.inputPass) this._el.inputPass.value = '';
+            if (this._el.inputPass && saved.pass) this._el.inputPass.value = saved.pass;
             if (this._el.inputRemember) this._el.inputRemember.checked = true;
         } catch {}
     }
@@ -2370,6 +2396,56 @@ export class RDPClient {
     _updateStatus(state, text) {
         this._el.statusDot.classList.toggle('connected', state === 'connected');
         this._el.statusText.textContent = text;
+    }
+
+    setAutoReconnect(enabled) {
+        this._autoReconnect = !!enabled;
+        if (!this._autoReconnect) this._clearReconnectTimer();
+        else this._reconnectAttempts = 0;
+        this._updateReconnectBtn();
+        return this._autoReconnect;
+    }
+
+    getAutoReconnect() {
+        return !!this._autoReconnect;
+    }
+
+    _updateReconnectBtn() {
+        const btn = this._el?.btnReconnect;
+        if (!btn) return;
+        btn.classList.toggle('on', !!this._autoReconnect);
+        btn.textContent = this._autoReconnect ? 'Reconnect: On' : 'Reconnect: Off';
+    }
+
+    _clearReconnectTimer() {
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+    }
+
+    _scheduleReconnect() {
+        if (!this._autoReconnect || this._manualDisconnect) return;
+        if (!this._lastCredentials) return;
+        const max = this.options.reconnectMaxAttempts || 3;
+        if (this._reconnectAttempts >= max) {
+            console.warn(`[RDPClient] Reconnect gave up after ${max} attempts`);
+            this._autoReconnect = false;
+            this._updateReconnectBtn();
+            this._updateStatus('disconnected', 'Disconnected');
+            return;
+        }
+        const delay = this.options.reconnectDelay || 10000;
+        this._clearReconnectTimer();
+        const attempt = this._reconnectAttempts + 1;
+        this._updateStatus('connecting', `Reconnecting ${attempt}/${max} in ${Math.round(delay / 1000)}s...`);
+        this._reconnectTimer = setTimeout(() => {
+            this._reconnectTimer = null;
+            if (!this._autoReconnect || this._manualDisconnect) return;
+            if (this._isConnected || this._pendingConnect) return;
+            this._reconnectAttempts = attempt;
+            this.connect({ ...this._lastCredentials }, { _retry: true }).catch(() => {});
+        }, delay);
     }
 
     _toggleMute() {
@@ -2513,7 +2589,9 @@ export class RDPClient {
         } else {
             this._rtcFailCount = 0;
             this._rtcGiveUp = false;
+            this._maybeDowngradeRtc();
             setTimeout(() => this._autoPickBestRoute(), 300);
+            if (this._mediaPath === 'ws') setTimeout(() => this._runRouteLoop(), 500);
         }
         this._renderRoutePop();
         return true;
@@ -2549,6 +2627,8 @@ export class RDPClient {
                 rttMs: rtc.rttMs, lossPct: rtc.lossPct, jitterMs: rtc.jitterMs,
                 score: rtc.score, updatedAt: Date.now(),
             };
+        } else if (this._rtc?.isOpen?.() || this._standbyRtc?.isOpen?.() || this._pendingRtc) {
+            out.rtc = { ...(out.rtc || {}), connected: true, updatedAt: Date.now() };
         }
         return out;
     }
@@ -2562,11 +2642,11 @@ export class RDPClient {
     }
 
     _fmtRouteMeta(s) {
-        if (s == null || (s.rttMs == null && s.lossPct == null)) return 'measuring…';
+        if (s == null || (s.rttMs == null && s.lossPct == null)) return s?.connected ? 'connected…' : 'measuring…';
         const parts = [];
-        if (s.rttMs !== null) parts.push(`${s.rttMs}ms`);
-        if (s.lossPct !== null) parts.push(`loss ${s.lossPct.toFixed(1)}%`);
-        if (s.jitterMs !== null) parts.push(`jit ${s.jitterMs}ms`);
+        if (typeof s.rttMs === 'number') parts.push(`${s.rttMs}ms`);
+        if (typeof s.lossPct === 'number') parts.push(`loss ${s.lossPct.toFixed(1)}%`);
+        if (typeof s.jitterMs === 'number') parts.push(`jit ${s.jitterMs}ms`);
         return parts.join(' · ') || '—';
     }
 
@@ -2655,6 +2735,29 @@ export class RDPClient {
         return rtt + loss * 120 + jit * 2;
     }
 
+    _isStableScore(s) {
+        if (!s || typeof s.rttMs !== 'number') return false;
+        if (s.lossPct !== null && s.lossPct !== undefined && s.lossPct > 5) return false;
+        if (s.jitterMs !== null && s.jitterMs !== undefined && s.jitterMs > 120) return false;
+        if (s.rttMs > 400) return false;
+        return true;
+    }
+
+    _isBadScore(s) {
+        if (!s || typeof s.rttMs !== 'number') return false;
+        return (s.lossPct !== null && s.lossPct !== undefined && s.lossPct > 5)
+            || (s.jitterMs !== null && s.jitterMs !== undefined && s.jitterMs > 120)
+            || s.rttMs > 400;
+    }
+
+    _autoCooldownOk() {
+        return Date.now() - (this._lastAutoSwitchAt || 0) >= (this._autoCooldownMs || 15000);
+    }
+
+    _markAutoSwitch() {
+        this._lastAutoSwitchAt = Date.now();
+    }
+
     _currentScores() {
         const wsAvg = this._latSamples.length
             ? this._latSamples.reduce((a, b) => a + b, 0) / this._latSamples.length
@@ -2690,23 +2793,44 @@ export class RDPClient {
         if (this._el?.routePop?.classList.contains('open')) this._renderRoutePop();
     }
 
+    _rtcCandidateScore() {
+        const s = this._routeStats.rtc;
+        if (s && typeof s.rttMs === 'number' && Date.now() - (s.updatedAt || 0) < 120000) {
+            const lossPct = s.lossPct ?? 0;
+            const jitterMs = s.jitterMs ?? 0;
+            return {
+                rttMs: s.rttMs, lossPct, jitterMs,
+                score: typeof s.score === 'number' ? s.score : this._scoreLink({ rttMs: s.rttMs, lossPct, jitterMs }),
+            };
+        }
+        return null;
+    }
+
     _maybeAutoSwitch() {
         if (!this._isConnected) return;
         if (this._routeMode !== 'auto') return;
         if (this._latSamples.length < 3) return;
         const { ws } = this._currentScores();
         if (ws.rttMs === null) return;
-        const wsBad = (ws.lossPct !== null && ws.lossPct > 5)
-            || (ws.jitterMs !== null && ws.jitterMs > 120)
-            || ws.rttMs > 400;
-        const anyLive = this._rtc?.isOpen?.() || this._pendingRtc || this._standbyRtc?.isOpen?.();
-        if (this._mediaPath === 'ws' && !anyLive && !this._rtcGiveUp) {
-            if (wsBad && this._latSamples.length >= 6) return;
+        if (this._mediaPath === 'ws') {
+            const anyLive = this._rtc?.isOpen?.() || this._pendingRtc || this._standbyRtc?.isOpen?.();
+            if (anyLive) {
+                this._autoPickBestRoute();
+                return;
+            }
+            const rtc = this._rtcCandidateScore();
+            if (rtc) {
+                this._autoPickBestRoute();
+                return;
+            }
+            if (this._rtcGiveUp) return;
+            if (!this._isBadScore(ws)) return;
+            if (!this._autoCooldownOk()) return;
             const q = ws.lossPct !== null
                 ? `rtt ${ws.rttMs}ms loss ${ws.lossPct.toFixed(1)}% jit ${ws.jitterMs ?? '-'}ms`
                 : `rtt ${ws.rttMs}ms`;
-            console.log(`[RDPClient] Probing RTC (ws ${q})`);
-            this._probeRtc(false);
+            console.log(`[RDPClient] Probing RTC (ws bad: ${q})`);
+            this._probeRtc(true);
         } else if (this._mediaPath === 'rtc' && this._rtcLink?.rttMs != null) {
             this._maybeDowngradeRtc();
         }
@@ -2846,6 +2970,19 @@ export class RDPClient {
     _parkStandby() {
         const cur = this._rtc;
         if (!cur || !cur.isOpen?.()) return;
+        if (this._rtcLink?.rttMs != null) {
+            this._routeStats.rtc = {
+                rttMs: this._rtcLink.rttMs,
+                lossPct: this._rtcLink.lossPct ?? this._routeStats.rtc?.lossPct ?? null,
+                jitterMs: this._rtcLink.jitterMs ?? this._routeStats.rtc?.jitterMs ?? null,
+                score: this._scoreLink({
+                    rttMs: this._rtcLink.rttMs,
+                    lossPct: this._rtcLink.lossPct ?? 0,
+                    jitterMs: this._rtcLink.jitterMs ?? 0,
+                }),
+                updatedAt: Date.now(),
+            };
+        }
         this._standbyRtc = cur;
         this._rtc = null;
         cur.onmedia = (e) => this._handleStandbyControl(e?.data);
@@ -2904,17 +3041,23 @@ export class RDPClient {
         }
         const { ws } = this._currentScores();
         if (ws.rttMs === null) return;
-        const s = this._routeStats.rtc;
-        const live = this._standbyRtc?.isOpen?.() || this._rtc?.isOpen?.();
-        let rtcScore = null;
-        if (s && s.rttMs !== null && Date.now() - s.updatedAt < 120000) {
-            rtcScore = s.score;
-        } else if (live) {
-            rtcScore = ws.score * 0.5;
+        const rtc = this._rtcCandidateScore();
+        if (!rtc) {
+            if (this._isBadScore(ws) && this._autoCooldownOk() && !this._rtcGiveUp) {
+                console.log(`[RDPClient] Auto route: ws bad but no rtc stats, probing`);
+                this._probeRtc(true);
+            }
+            return;
         }
-        if (rtcScore === null) return;
-        if (rtcScore > ws.score * 0.85) return;
-        console.log(`[RDPClient] Auto route: WS score ${Math.round(ws.score)} -> rtc score ${Math.round(rtcScore)}`);
+        if (!this._isBadScore(ws)) return;
+        if (!this._isStableScore(rtc)) {
+            console.log(`[RDPClient] Auto route: ws bad but rtc unstable (rtt ${rtc.rttMs}ms loss ${(rtc.lossPct ?? 0).toFixed(1)}%), staying`);
+            return;
+        }
+        if (!(rtc.score < ws.score * 0.85)) return;
+        if (!this._autoCooldownOk()) return;
+        console.log(`[RDPClient] Auto route: WS bad score ${Math.round(ws.score)} -> rtc stable score ${Math.round(rtc.score)}, switching`);
+        this._markAutoSwitch();
         this._rtcFailCount = 0;
         this._rtcGiveUp = false;
         if (this._standbyRtc?.isOpen?.()) this._adoptStandby();
@@ -2964,6 +3107,32 @@ export class RDPClient {
             return;
         }
         if (this._rtc?.isOpen?.() || this._pendingRtc || this._standbyRtc?.isOpen?.()) {
+            const sb = this._standbyRtc?.isOpen?.() ? this._standbyRtc : (this._rtc?.isOpen?.() ? this._rtc : null);
+            if (sb) {
+                const r = await sb.pingKeepalive().catch(() => null);
+                if (r && typeof r.rttMs === 'number') {
+                    const prev = this._routeStats.rtc || {};
+                    const rttMs = r.rttMs;
+                    const lossPct = prev.lossPct ?? 0;
+                    const jitterMs = prev.jitterMs ?? 0;
+                    this._routeStats.rtc = {
+                        ...prev, rttMs, lossPct, jitterMs,
+                        score: this._scoreLink({ rttMs, lossPct, jitterMs }),
+                        updatedAt: Date.now(),
+                    };
+                } else {
+                    const info = await sb.getSelectedCandidateInfo?.().catch(() => null);
+                    if (info && typeof info.rttMs === 'number') {
+                        const lossPct = info.lossPct ?? this._routeStats.rtc?.lossPct ?? 0;
+                        const jitterMs = info.jitterMs ?? this._routeStats.rtc?.jitterMs ?? 0;
+                        this._routeStats.rtc = {
+                            rttMs: info.rttMs, lossPct, jitterMs,
+                            score: this._scoreLink({ rttMs: info.rttMs, lossPct, jitterMs }),
+                            updatedAt: Date.now(),
+                        };
+                    }
+                }
+            }
             if (this._el?.routePop?.classList.contains('open')) this._renderRoutePop();
             return;
         }
@@ -3095,17 +3264,23 @@ export class RDPClient {
         if (this._routeMode !== 'auto' || this._mediaPath !== 'rtc') return;
         const { ws, rtc } = this._currentScores();
         if (!rtc || rtc.rttMs === null) return;
-        if (ws.rttMs === null || this._latSamples.length < 3) return;
-        if (rtc.score > ws.score * 1.3) {
-            console.warn(`[RDPClient] RTC worse than WS (rtc rtt ${rtc.rttMs}ms score ${Math.round(rtc.score)} vs ws rtt ${ws.rttMs}ms score ${Math.round(ws.score)}), falling back`);
+        if (ws.rttMs === null) return;
+        const rtcBad = this._isBadScore(rtc);
+        const rtcWorse = rtc.score > ws.score * 1.3;
+        if (!rtcBad && !rtcWorse) return;
+        if (!this._isStableScore(ws)) {
+            console.log(`[RDPClient] Auto route: rtc bad but ws unstable (ws rtt ${ws.rttMs}ms loss ${(ws.lossPct ?? 0).toFixed(1)}% vs rtc rtt ${rtc.rttMs}ms), staying`);
+            return;
+        }
+        if (!(rtc.score > ws.score * 1.15) && !(rtcBad && rtc.score > ws.score)) return;
+        if (!this._autoCooldownOk()) return;
+        this._markAutoSwitch();
+        if (rtcWorse) {
+            console.warn(`[RDPClient] RTC worse than stable WS (rtc rtt ${rtc.rttMs}ms score ${Math.round(rtc.score)} vs ws rtt ${ws.rttMs}ms score ${Math.round(ws.score)}), falling back`);
             this._downgradeToWs('auto-better-ws');
             return;
         }
-        const rtcBad = (rtc.lossPct !== null && rtc.lossPct > 8)
-            || (rtc.jitterMs !== null && rtc.jitterMs > 200)
-            || rtc.rttMs > 600;
-        if (!rtcBad) return;
-        console.warn(`[RDPClient] RTC poor (rtt ${rtc.rttMs}ms loss ${rtc.lossPct?.toFixed(1) ?? '-'}% jit ${rtc.jitterMs ?? '-'}ms), falling back`);
+        console.warn(`[RDPClient] RTC poor but WS stable (rtt ${rtc.rttMs}ms loss ${rtc.lossPct?.toFixed(1) ?? '-'}% jit ${rtc.jitterMs ?? '-'}ms), falling back`);
         this._downgradeToWs('poor-link');
     }
 
@@ -3150,10 +3325,7 @@ export class RDPClient {
         if (this._rtc) { try { this._rtc.close(); } catch {} }
         this._rtc = null;
         this._mediaPath = 'ws';
-        this._latSamples = [];
         this._rtcLink = { candidateType: null, rttMs: null, jitterMs: null, lossPct: null };
-        this._wsQuality = { sent: 0, lost: 0, jitterMs: null, lossPct: null, lastRtt: null };
-        this._pingPending = new Map();
         this._updateTransportBadge();
         this._emit('transport', { mediaPath: 'ws', mode: this._transportMode, routeMode: this._routeMode, reason });
         if (this._el?.routePop?.classList.contains('open')) this._renderRoutePop();
@@ -3318,6 +3490,8 @@ export class RDPClient {
 
     _handleConnected(msg) {
         this._isConnected = true;
+        this._reconnectAttempts = 0;
+        this._clearReconnectTimer();
         this._mediaPath = 'ws';
         this._latSamples = [];
         this._rtcLink = { candidateType: null, rttMs: null, jitterMs: null, lossPct: null };
@@ -3401,8 +3575,11 @@ export class RDPClient {
         this._cleanupGfxWorker();
         
         this._emit('disconnected');
-        
-        // Auto-show modal when keepConnectionModalOpen is enabled
+
+        if (!this._manualDisconnect && this._autoReconnect) {
+            this._scheduleReconnect();
+            if (this._reconnectTimer) return;
+        }
         if (this.options.keepConnectionModalOpen) {
             this._showModal();
         }
@@ -3465,7 +3642,7 @@ export class RDPClient {
         console.error('[RDPClient] Error:', message);
         this._updateStatus('error', 'Error');
         this._emit('error', { message });
-        
+
         // If we have a pending connect promise (connection attempt failed),
         // reject it and close the transport to allow retry
         if (this._pendingConnect) {
@@ -3477,6 +3654,10 @@ export class RDPClient {
                 this._transport.close();
                 // Note: _handleDisconnect will be called by onclose handler
             }
+            return;
+        }
+        if (!this._isConnected && this._autoReconnect && !this._manualDisconnect && this._lastCredentials) {
+            this._scheduleReconnect();
         }
         // If already connected, just emit the error - don't force disconnect
     }

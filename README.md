@@ -44,7 +44,7 @@ It is a works for me project, but looking forward to any contributors.
 - 🤖 **JS-Driven automation** - Programmatic keyboard and mouse control with screenshot functionality for RPA and testing
 - 🎨 **Customizable theming** - Built-in presets (dark, light, midnight, high-contrast) and shadow dom for robustness
 - 📋 **Bidirectional clipboard** - Text sync between browser and remote session (📋 button pushes local text, remote copies auto-fill local clipboard)
-- 💾 **Remember connection** - Host, port and username saved to localStorage (password never stored)
+- 💾 **Remember connection** - Host, port, username and password saved to localStorage
 - 📊 Latency monitoring (ping/pong)
 - 🩺 Health check endpoint (`/health`)
 - 🐳 Docker support with multi-stage builds
@@ -89,23 +89,28 @@ It is a works for me project, but looking forward to any contributors.
 
 ## Quick Start with Docker (Recommended)
 
-The easiest way to run the application is using Docker Compose:
+The easiest way to run the application is using Docker Compose. `docker-compose.yml` pins both modes in one file: `image` (GHCR prebuilt) + `build` (local source).
 
 ```bash
-# Build and start both services
-docker-compose up -d
+# Fast path: use prebuilt GHCR images (amd64/arm64)
+docker compose pull
+docker compose up -d
+
+# Dev path: build from local source instead
+docker compose build
+docker compose up -d
 
 # View logs
-docker-compose logs -f
+docker compose logs -f
 
 # Stop services
-docker-compose down
+docker compose down
 ```
 
 - **Frontend**: http://localhost:8000 (nginx proxies same-origin `/ws/` to the backend, override with `BACKEND_UPSTREAM=host:8765`)
 - **Health Check**: http://localhost:8000/health
 
-> Prebuilt multi-arch images (amd64/arm64) are published to GHCR on every push to `main` via `.github/workflows/docker-publish.yml` (`freerdp-web-backend` / `freerdp-web-frontend`).
+> Prebuilt multi-arch images (amd64/arm64) are published to GHCR on every push to `main` via `.github/workflows/docker-publish.yml` (`ghcr.io/scyslz/freerdp-web-backend:latest` / `ghcr.io/scyslz/freerdp-web-frontend:latest`). `docker compose pull` uses images, `docker compose build` compiles locally (FreeRDP3 + WASM take a while).
 
 ## Manual Setup
 
