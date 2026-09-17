@@ -49,25 +49,69 @@ def is_available() -> bool:
     return AIORTC_AVAILABLE
 
 
+DEFAULT_STUN_URLS = (
+    'stun:stun.miwifi.com:3478,'
+    'stun:stun.qq.com:3478,'
+    'stun:stun.chat.bilibili.com:3478'
+)
+
+
+def _dedup(urls) -> list:
+    seen = set()
+    out = []
+    for u in urls:
+        u = (u or '').strip()
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
 def get_stun_servers() -> list:
-    raw = os.getenv('RTC_STUN_URLS', 'stun:stun.miwifi.com:3478,stun:stun.l.google.com:19302')
-    urls = [u.strip() for u in raw.split(',') if u.strip()]
-    return urls
+    raw = os.getenv('RTC_STUN_URLS', DEFAULT_STUN_URLS)
+    return _dedup(raw.split(','))
+
+
+def get_turn_servers() -> list:
+    """TURN servers as dicts: {urls, username, credential}.
+
+    RTC_TURN_URLS: comma-separated turn:/turns: URLs.
+    RTC_TURN_USER / RTC_TURN_PASS: shared credential.
+    """
+    raw = os.getenv('RTC_TURN_URLS', '')
+    urls = _dedup(raw.split(','))
+    if not urls:
+        return []
+    username = os.getenv('RTC_TURN_USER', '')
+    credential = os.getenv('RTC_TURN_PASS', '')
+    return [{'urls': u, 'username': username, 'credential': credential} for u in urls]
+
+
+def get_ice_servers() -> list:
+    """Full ICE server list: all STUN + optional TURN (single PC, best path wins)."""
+    servers = [{'urls': u} for u in get_stun_servers()]
+    servers.extend(get_turn_servers())
+    return servers
 
 
 @dataclass
 class RtcPendingSession:
     pc: Any
+    route: str = 'rtc'
     media_channel: Optional[Any] = None
+    control_channel: Optional[Any] = None
     ready: asyncio.Event = None  # type: ignore
-    created_at: float = 0.0
+    last_seen: float = 0.0
 
     def __post_init__(self):
         if self.ready is None:
             self.ready = asyncio.Event()
-        if not self.created_at:
+        if not self.last_seen:
             import time
-            self.created_at = time.monotonic()
+            self.last_seen = time.monotonic()
+
+# Control-channel keepalive magic: RPNG + u64 ms timestamp, echoed back.
+KEEPALIVE_MAGIC = b'RPNG'
 
 
 class DataChannelSender:
@@ -107,62 +151,89 @@ class DataChannelSender:
         return ch is not None and getattr(ch, 'readyState', '') == 'open'
 
 
+def _norm_route(route) -> str:
+    return 'rtc'
+
+
 class WebRTCManager:
-    """Owns one RTCPeerConnection per signaling WebSocket."""
+    """Owns one RTCPeerConnection per signaling WebSocket.
+
+    Single PC with full ICE (STUN+TURN): ICE elects the best pair
+    (host > srflx > relay) so no manual p2p/turn split is needed.
+    Session stays alive after downgrade for instant re-switch; a 20s
+    control-channel keepalive (RPNG) keeps NAT bindings fresh.
+    """
 
     def __init__(self):
         self._sessions: Dict[int, RtcPendingSession] = {}
 
-    def has_session(self, client_id: int) -> bool:
-        sess = self._sessions.get(client_id)
+    @staticmethod
+    def _key(client_id: int, route: str = 'rtc') -> int:
+        return client_id
+
+    def has_session(self, client_id: int, route: str = 'rtc') -> bool:
+        sess = self._sessions.get(self._key(client_id, route))
         return sess is not None and sess.media_channel is not None and sess.ready.is_set()
 
-    def get_media_sender(self, client_id: int):
-        sess = self._sessions.get(client_id)
+    def get_media_sender(self, client_id: int, route: str = 'rtc'):
+        sess = self._sessions.get(self._key(client_id, route))
         if sess is None:
             return None
-        return DataChannelSender(lambda: sess.media_channel)
+        return DataChannelSender(lambda s=sess: s.media_channel)
 
-    def get_session(self, client_id: int) -> Optional[RtcPendingSession]:
-        return self._sessions.get(client_id)
+    def get_session(self, client_id: int, route: str = 'rtc') -> Optional[RtcPendingSession]:
+        return self._sessions.get(self._key(client_id, route))
 
-    async def handle_offer(self, client_id: int, sdp: str, websocket) -> Optional[str]:
+    def touch(self, client_id: int, route: str = 'rtc') -> None:
+        import time
+        sess = self._sessions.get(self._key(client_id, route))
+        if sess is not None:
+            sess.last_seen = time.monotonic()
+
+    def live_routes(self, client_id: int) -> list:
+        sess = self._sessions.get(client_id)
+        if sess is not None and sess.media_channel is not None and sess.ready.is_set():
+            return ['rtc']
+        return []
+
+    async def handle_offer(self, client_id: int, sdp: str, websocket, route: str = 'rtc') -> Optional[str]:
         if not AIORTC_AVAILABLE:
             await websocket.send(json.dumps({
                 'type': 'error',
                 'message': f'WebRTC unavailable: {_AIORTC_IMPORT_ERROR}',
             }))
             return None
-        import time
-        now = time.monotonic()
-        debounce_s = float(os.getenv('RTC_OFFER_DEBOUNCE_S', '10'))
-        existing = self._sessions.get(client_id)
-        if existing is not None and (now - (existing.created_at or 0)) < debounce_s:
-            logger.info(f"Client {client_id}: duplicate offer ignored (debounce {debounce_s}s)")
-            try:
-                local = existing.pc.localDescription
-                if local is not None:
-                    return local.sdp
-            except Exception:
-                pass
-            return None
-        await self._close_session(client_id)
-        stun_urls = get_stun_servers()
-        logger.info(f"Client {client_id}: RTC offer, STUN={stun_urls}")
+        route = _norm_route(route)
+        # Single PC per client: a retry replaces the old session.
+        # Sessions stay alive after downgrade for instant re-switch.
+        await self._close_session(client_id, route)
+        ice_servers = get_ice_servers()
+        logger.info(f"Client {client_id}: RTC offer, ICE={len(ice_servers)} servers")
         if RTCConfiguration is not None:
-            config = RTCConfiguration([RTCIceServer(urls=u) for u in stun_urls])
+            rtc_servers = []
+            for s in ice_servers:
+                if isinstance(s, dict) and s.get('urls', '').startswith('turn'):
+                    rtc_servers.append(RTCIceServer(
+                        urls=s['urls'],
+                        username=s.get('username') or None,
+                        credential=s.get('credential') or None,
+                    ))
+                else:
+                    rtc_servers.append(RTCIceServer(urls=s['urls'] if isinstance(s, dict) else s))
+            config = RTCConfiguration(rtc_servers)
             pc = RTCPeerConnection(config)
         else:
             pc = RTCPeerConnection()
-        sess = RtcPendingSession(pc=pc)
-        self._sessions[client_id] = sess
+        sess = RtcPendingSession(pc=pc, route=route)
+        self._sessions[self._key(client_id, route)] = sess
 
         @pc.on('datachannel')
         def on_datachannel(channel):
             logger.info(f"Client {client_id}: remote datachannel '{channel.label}'")
             if channel.label == 'control':
+                sess.control_channel = channel
                 channel.on('message', lambda msg: asyncio.ensure_future(
-                    self._on_control_message(client_id, msg)))
+                    self._on_control_message(client_id, route, msg)))
             elif channel.label == 'media':
                 sess.media_channel = channel
                 sess.ready.set()
@@ -199,8 +270,8 @@ class WebRTCManager:
             pass
         return pc.localDescription.sdp
 
-    async def handle_remote_ice(self, client_id: int, candidate) -> None:
-        sess = self._sessions.get(client_id)
+    async def handle_remote_ice(self, client_id: int, candidate, route: str = 'rtc') -> None:
+        sess = self._sessions.get(self._key(client_id, route))
         if sess is None or not AIORTC_AVAILABLE:
             return
         if candidate is None:
@@ -229,22 +300,36 @@ class WebRTCManager:
         except Exception as e:
             logger.debug(f"Client {client_id}: addIceCandidate error: {e}")
 
-    async def _on_control_message(self, client_id: int, msg) -> None:
-        # Filled in by server.py: routes FACK bytes to RDPBridge.
-        handler = getattr(self, 'on_control_bytes', None)
-        if handler is None:
-            return
+    async def _on_control_message(self, client_id: int, route: str, msg) -> None:
         try:
             if isinstance(msg, str):
                 data = msg.encode()
             else:
                 data = bytes(msg)
-            await handler(client_id, data)
+        except Exception as e:
+            logger.debug(f"Client {client_id}: control msg error: {e}")
+            return
+        # Keepalive echo: RPNG + u64 timestamp (12 bytes), reply same bytes.
+        if len(data) == 12 and data[:4] == KEEPALIVE_MAGIC:
+            try:
+                sess = self._sessions.get(self._key(client_id, route))
+                ch = sess.control_channel if sess else None
+                if ch is not None and getattr(ch, 'readyState', '') == 'open':
+                    ch.send(data)
+                self.touch(client_id, route)
+            except Exception as e:
+                logger.debug(f"Client {client_id}: keepalive echo error: {e}")
+            return
+        handler = getattr(self, 'on_control_bytes', None)
+        if handler is None:
+            return
+        try:
+            await handler(client_id, route, data)
         except Exception as e:
             logger.debug(f"Client {client_id}: control msg error: {e}")
 
-    async def wait_ready(self, client_id: int, timeout: float = 10.0) -> bool:
-        sess = self._sessions.get(client_id)
+    async def wait_ready(self, client_id: int, route: str = 'rtc', timeout: float = 10.0) -> bool:
+        sess = self._sessions.get(self._key(client_id, route))
         if sess is None:
             return False
         try:
@@ -253,7 +338,7 @@ class WebRTCManager:
         except asyncio.TimeoutError:
             return False
 
-    async def _close_session(self, client_id: int) -> None:
+    async def _close_session(self, client_id: int, route: str = None) -> None:
         sess = self._sessions.pop(client_id, None)
         if sess is None:
             return
@@ -262,5 +347,5 @@ class WebRTCManager:
         except Exception:
             pass
 
-    async def close(self, client_id: int) -> None:
-        await self._close_session(client_id)
+    async def close(self, client_id: int, route: str = None) -> None:
+        await self._close_session(client_id, route)

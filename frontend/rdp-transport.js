@@ -16,12 +16,81 @@ export function getStunUrlsFromQuery() {
     return null;
 }
 
-export const DEFAULT_STUN_URLS = ['stun:stun.miwifi.com:3478', 'stun:stun.l.google.com:19302'];
+export function getTurnFromQuery() {
+    try {
+        const params = new URLSearchParams(window.location?.search || '');
+        const urls = params.get('turn');
+        if (!urls) return null;
+        return {
+            urls: urls.split(',').map((s) => s.trim()).filter(Boolean),
+            username: params.get('turnUser') || params.get('turnUsername') || '',
+            credential: params.get('turnPass') || params.get('turnPassword') || params.get('turnCredential') || '',
+        };
+    } catch {}
+    return null;
+}
+
+export const DEFAULT_STUN_URLS = [
+    'stun:stun.miwifi.com:3478',
+    'stun:stun.qq.com:3478',
+    'stun:stun.chat.bilibili.com:3478',
+];
+
+export function expandStunServers(urls) {
+    const list = (urls && urls.length ? urls : DEFAULT_STUN_URLS)
+        .map((s) => String(s).trim()).filter(Boolean);
+    return [...new Set(list)];
+}
+
+export function expandIceServers(opts = {}) {
+    const stuns = expandStunServers(opts.stunUrls);
+    const servers = stuns.map((u) => ({ urls: u }));
+    const turns = opts.turnUrls && opts.turnUrls.length ? opts.turnUrls : [];
+    for (const u of turns) {
+        const entry = { urls: u };
+        if (opts.turnUsername) entry.username = opts.turnUsername;
+        if (opts.turnCredential) entry.credential = opts.turnCredential;
+        servers.push(entry);
+    }
+    return servers;
+}
+
+export async function fetchIceServers(url = '/ice-servers', timeoutMs = 4000) {
+    try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        const res = await fetch(url, { signal: ctrl.signal, credentials: 'same-origin' });
+        clearTimeout(timer);
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data && Array.isArray(data.iceServers) && data.iceServers.length) {
+            return data.iceServers;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
 
 export class RtcMediaTransport {
     constructor(signaling, opts = {}) {
         this._signaling = signaling;
-        this._stunUrls = opts.stunUrls && opts.stunUrls.length ? opts.stunUrls : DEFAULT_STUN_URLS;
+        this._route = 'rtc';
+        this._background = !!opts.background;
+        this._iceServers = opts.iceServers && opts.iceServers.length
+            ? opts.iceServers
+            : expandIceServers(opts);
+        this._offerSeq = 0;
+        this._pendingOfferId = null;
+        this._answerApplying = false;
+        this._iceQueue = [];
+        this._kpWait = null;
+        this.oncontrol = null;
+        const firstStun = (opts.stunUrls && opts.stunUrls[0])
+            || (opts.stunUrl)
+            || (this._iceServers.find((s) => String(s.urls || '').startsWith('stun:')) || {}).urls
+            || DEFAULT_STUN_URLS[0];
+        this._stunUrl = firstStun;
         this._timeoutMs = opts.timeoutMs || 10000;
         this._pc = null;
         this._controlDc = null;
@@ -41,17 +110,23 @@ export class RtcMediaTransport {
     isOpen() {
         return this.isControlOpen() && this.isMediaOpen();
     }
+    get stunUrl() {
+        return this._stunUrl;
+    }
     async start() {
         if (this._pc) throw new Error('RTC already started');
         if (typeof RTCPeerConnection === 'undefined') throw new Error('WebRTC unsupported');
         this._closed = false;
-        const pc = new RTCPeerConnection({ iceServers: [{ urls: this._stunUrls }] });
+        const pcConfig = { iceServers: this._iceServers };
+        const pc = new RTCPeerConnection(pcConfig);
         this._pc = pc;
         pc.onicecandidate = (e) => {
             if (e.candidate) {
                 try {
                     this._signaling.sendJson({
                         type: 'rtc-ice',
+                        route: this._route,
+                        offerId: this._pendingOfferId,
                         candidate: {
                             candidate: e.candidate.candidate,
                             sdpMid: e.candidate.sdpMid,
@@ -84,10 +159,16 @@ export class RtcMediaTransport {
         control.onopen = () => this._checkOpen();
         control.onclose = () => this.onstate?.('control-closed');
         control.onerror = (e) => this.onerror?.(e);
+        control.onmessage = (ev) => this._onControlMessage(ev);
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        this._offerSeq += 1;
+        this._pendingOfferId = this._offerSeq;
         try {
-            this._signaling.sendJson({ type: 'rtc-offer', sdp: pc.localDescription.sdp });
+            this._signaling.sendJson({
+                type: 'rtc-offer', sdp: pc.localDescription.sdp,
+                route: this._route, offerId: this._pendingOfferId,
+            });
         } catch (e) {
             throw e;
         }
@@ -115,15 +196,88 @@ export class RtcMediaTransport {
         this.onerror?.(err);
         this.onstate?.('failed');
     }
-    async handleAnswer(sdp) {
-        if (!this._pc) return;
-        await this._pc.setRemoteDescription({ type: 'answer', sdp });
+    async handleAnswer(sdp, offerId = null) {
+        try {
+            if (!this._pc || this._closed) return;
+            if (this._answerApplying) return;
+            if (offerId !== null && offerId !== this._pendingOfferId) return;
+            if (this._pc.signalingState !== 'have-local-offer') return;
+            this._answerApplying = true;
+            try {
+                await this._pc.setRemoteDescription({ type: 'answer', sdp });
+            } finally {
+                this._answerApplying = false;
+            }
+            this._pendingOfferId = null;
+            for (const c of this._iceQueue.splice(0)) {
+                try { await this._pc.addIceCandidate(c); } catch {}
+            }
+        } catch {}
     }
     async handleRemoteIce(candidate) {
         if (!this._pc || !candidate) return;
+        if (this._pc.remoteDescription === null) {
+            this._iceQueue.push(candidate);
+            if (this._iceQueue.length > 100) this._iceQueue.shift();
+            return;
+        }
         try {
             await this._pc.addIceCandidate(candidate);
         } catch {}
+    }
+    _onControlMessage(ev) {
+        const data = ev?.data;
+        if (!(data instanceof ArrayBuffer)) {
+            this.oncontrol?.(data);
+            return;
+        }
+        if (data.byteLength === 12) {
+            const v = new DataView(data);
+            if (v.getUint8(0) === 0x52 && v.getUint8(1) === 0x50
+                && v.getUint8(2) === 0x4E && v.getUint8(3) === 0x47) {
+                if (this._kpWait !== null) {
+                    const rtt = performance.now() - this._kpWait.t0;
+                    this._kpWait.resolve({ rttMs: Math.round(rtt) });
+                    this._kpWait = null;
+                }
+                return;
+            }
+        }
+        this.oncontrol?.(data);
+    }
+    pingKeepalive(timeoutMs = 3000) {
+        if (!this.isControlOpen() || this._kpWait !== null) return Promise.resolve(null);
+        return new Promise((resolve) => {
+            const buf = new ArrayBuffer(12);
+            const v = new DataView(buf);
+            v.setUint8(0, 0x52); v.setUint8(1, 0x50); v.setUint8(2, 0x4E); v.setUint8(3, 0x47);
+            v.setUint32(4, Math.floor(performance.now()) >>> 0);
+            v.setUint32(8, (Math.random() * 0xFFFFFFFF) >>> 0);
+            const timer = setTimeout(() => {
+                if (this._kpWait) {
+                    this._kpWait = null;
+                    resolve(null);
+                }
+            }, timeoutMs);
+            this._kpWait = { t0: performance.now(), resolve: (r) => { clearTimeout(timer); resolve(r); } };
+            try {
+                this._controlDc.send(buf);
+            } catch {
+                this._kpWait = null;
+                clearTimeout(timer);
+                resolve(null);
+            }
+        });
+    }
+    startKeepalive(intervalMs = 20000) {
+        this.stopKeepalive();
+        this._kpTimer = setInterval(() => { this.pingKeepalive(); }, intervalMs);
+    }
+    stopKeepalive() {
+        if (this._kpTimer) {
+            clearInterval(this._kpTimer);
+            this._kpTimer = null;
+        }
     }
     sendControl(data) {
         if (this.isControlOpen() && data) {
@@ -146,18 +300,37 @@ export class RtcMediaTransport {
             const stats = await this._pc.getStats();
             let pair = null;
             const remotes = new Map();
+            const locals = new Map();
             stats.forEach((r) => {
                 if (r.type === 'remote-candidate') remotes.set(r.id, r);
+                else if (r.type === 'local-candidate') locals.set(r.id, r);
                 else if (r.type === 'candidate-pair' && r.state === 'succeeded' && (r.nominated || r.selected)) pair = r;
+            });
+            if (!pair) stats.forEach((r) => {
+                if (!pair && r.type === 'candidate-pair' && (r.nominated || (r.selected && r.state === 'succeeded'))) pair = r;
             });
             if (!pair) stats.forEach((r) => {
                 if (!pair && r.type === 'candidate-pair' && r.state === 'succeeded') pair = r;
             });
             if (!pair) return null;
             const remote = remotes.get(pair.remoteCandidateId);
+            const local = locals.get(pair.localCandidateId);
+            const type = remote?.candidateType || local?.candidateType || null;
+            const sent = typeof pair.packetsSent === 'number' ? pair.packetsSent : null;
+            const lost = typeof pair.packetsLost === 'number' ? pair.packetsLost : null;
+            let lossPct = null;
+            if (sent !== null && lost !== null && (sent + lost) > 0) {
+                lossPct = (lost / (sent + lost)) * 100;
+            }
             return {
-                candidateType: remote?.candidateType || null,
+                candidateType: type,
+                localType: local?.candidateType || null,
+                remoteType: remote?.candidateType || null,
                 rttMs: typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null,
+                jitterMs: typeof pair.jitter === 'number' ? Math.round(pair.jitter * 1000) : null,
+                packetsSent: sent,
+                packetsLost: lost,
+                lossPct,
             };
         } catch {
             return null;
@@ -165,6 +338,7 @@ export class RtcMediaTransport {
     }
     close() {
         this._closed = true;
+        this.stopKeepalive?.();
         if (this._timeoutTimer) {
             clearTimeout(this._timeoutTimer);
             this._timeoutTimer = null;

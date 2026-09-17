@@ -11,7 +11,10 @@ services:
       - WS_HOST=0.0.0.0
       - WS_PORT=8765
       - LOG_LEVEL=INFO
-      - RTC_STUN_URLS=${RTC_STUN_URLS:-stun:stun.miwifi.com:3478,stun:stun.l.google.com:19302}
+      - RTC_STUN_URLS=${RTC_STUN_URLS:-stun:stun.miwifi.com:3478,stun:stun.qq.com:3478,stun:stun.chat.bilibili.com:3478}
+      - RTC_TURN_URLS=${RTC_TURN_URLS:-}
+      - RTC_TURN_USER=${RTC_TURN_USER:-}
+      - RTC_TURN_PASS=${RTC_TURN_PASS:-}
       - RTC_GATHER_TIMEOUT=${RTC_GATHER_TIMEOUT:-5}
       # Enable Progressive codec for browser-side WASM decoding
       # Set to 1 or true to enable, disabled by default

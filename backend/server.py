@@ -16,9 +16,11 @@ from websockets.http11 import Response
 from websockets.datastructures import Headers
 
 from rdp_bridge import RDPBridge, RDPConfig, NativeLibrary
-from wire_format import parse_frame_ack, get_message_type, Magic, build_reset_graphics
+from wire_format import parse_frame_ack, get_message_type, Magic
 from transport import WebSocketSender
-from webrtc_transport import WebRTCManager, is_available as webrtc_available
+from webrtc_transport import (
+    WebRTCManager, is_available as webrtc_available, get_ice_servers,
+)
 
 # Load environment variables
 load_dotenv()
@@ -71,11 +73,40 @@ sessions: Dict[ServerConnection, RDPBridge] = {}
 # One WebRTC manager for all signaling sockets (STUN only, WS fallback)
 rtc_manager = WebRTCManager()
 
+# client_id -> in-flight offer task (gathering must not block WS loop)
+_rtc_offer_tasks: Dict[int, asyncio.Task] = {}
+
+# aioice logs 'sendto on NoneType' tracebacks when a PC is closed mid-retry.
+# Harmless noise: demote asyncio ERROR logs from that path.
+_aioice_noise_logger = logging.getLogger('asyncio')
+
+
+class _AioiceNoiseFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if 'send_stun' in msg or 'sendto' in msg or '__retry' in msg:
+            return False
+        if record.exc_info and record.exc_info[0] is not None:
+            try:
+                import traceback
+                tb = ''.join(traceback.format_exception(*record.exc_info))
+                if 'aioice' in tb and ('sendto' in tb or 'send_stun' in tb):
+                    return False
+            except Exception:
+                pass
+        return True
+
+
+_aioice_noise_logger.addFilter(_AioiceNoiseFilter())
+
 # client_id -> RDPBridge for DataChannel control routing
 _rtc_bridges: Dict[int, RDPBridge] = {}
 
 
-async def handle_control_bytes(client_id: int, data: bytes):
+async def handle_control_bytes(client_id: int, route: str, data: bytes):
     """Route DataChannel 'control' binary (FACK) to the RDP bridge."""
     bridge = _rtc_bridges.get(client_id)
     if bridge is None:
@@ -142,6 +173,13 @@ def process_request(connection, request):
         - Response for health checks and regular HTTP requests
         - None to proceed with WebSocket handshake
     """
+    # ICE servers for WebRTC (STUN + TURN credential from server env,
+    # never hardcode TURN secrets in frontend). Same-origin, no auth.
+    if request.path == '/ice-servers' or request.path == '/ice-servers/':
+        headers = Headers([("Content-Type", "application/json")])
+        body = json.dumps({"iceServers": get_ice_servers()}).encode('utf-8')
+        return Response(HTTPStatus.OK.value, "OK", headers, body)
+
     # Health check endpoint
     if request.path == '/health' or request.path == '/healthz':
         lib_ok, lib_msg = check_native_library()
@@ -348,7 +386,10 @@ async def handle_client(websocket: ServerConnection):
                             }))
                 
                 elif msg_type == 'ping':
-                    await websocket.send(json.dumps({'type': 'pong'}))
+                    pong = {'type': 'pong'}
+                    if isinstance(data.get('seq'), int):
+                        pong['seq'] = data['seq']
+                    await websocket.send(json.dumps(pong))
 
                 elif msg_type == 'clipboard':
                     if rdp_bridge:
@@ -370,63 +411,67 @@ async def handle_client(websocket: ServerConnection):
 
                 elif msg_type == 'rtc-offer':
                     sdp = data.get('sdp', '')
+                    offer_id = data.get('offerId')
                     if not sdp:
                         await websocket.send(json.dumps({'type': 'error', 'message': 'Missing SDP offer'}))
                     elif not webrtc_available():
                         await websocket.send(json.dumps({'type': 'rtc-unavailable', 'reason': 'aiortc not installed'}))
                     else:
-                        answer = await rtc_manager.handle_offer(client_id, sdp, websocket)
-                        if answer:
+                        # Run in background: gathering blocks up to 5s and must
+                        # not stall mouse/keyboard/resize on the WS loop.
+                        # Single PC per client: a retry replaces the old offer.
+                        key = client_id
+                        old = _rtc_offer_tasks.pop(key, None)
+                        if old is not None and not old.done():
+                            old.cancel()
+                        async def _do_offer(sdp_text=sdp, cid=client_id, ws=websocket, oid=offer_id, k=key):
                             try:
-                                await websocket.send(json.dumps({'type': 'rtc-answer', 'sdp': answer}))
-                            except Exception:
+                                answer = await rtc_manager.handle_offer(cid, sdp_text, ws)
+                                if answer:
+                                    try:
+                                        await ws.send(json.dumps({
+                                            'type': 'rtc-answer', 'sdp': answer,
+                                            'route': 'rtc', 'offerId': oid,
+                                        }))
+                                    except Exception:
+                                        pass
+                            except asyncio.CancelledError:
                                 pass
+                            except Exception as e:
+                                logger.debug(f"Client {cid}: offer task error: {e}")
+                            finally:
+                                _rtc_offer_tasks.pop(k, None)
+                        _rtc_offer_tasks[key] = asyncio.create_task(_do_offer())
 
                 elif msg_type == 'rtc-ice':
                     await rtc_manager.handle_remote_ice(client_id, data.get('candidate'))
 
                 elif msg_type == 'rtc-upgrade':
-                    # Client says DC is open: switch media sender to DataChannel.
-                    # Send RSGR first on the new channel so the client resyncs
-                    # cleanly (WS and DC have different latencies; mixed order
-                    # would corrupt the frame stream).
+                    # Client says DC is open: queue sender switch at next frame
+                    # boundary. Session stays alive for instant re-switch.
                     if rdp_bridge and rtc_manager.has_session(client_id):
                         sender = rtc_manager.get_media_sender(client_id)
                         if sender is not None:
-                            rdp_bridge.sender = sender
+                            rdp_bridge.request_sender_switch(sender)
                             _rtc_bridges[client_id] = rdp_bridge
-                            try:
-                                await sender.send_bytes(
-                                    build_reset_graphics(rdp_bridge.config.width,
-                                                         rdp_bridge.config.height))
-                            except Exception:
-                                pass
-                            logger.info(f"Client {client_id}: media upgraded to RTC DataChannel")
-                            await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'rtc'}))
+                            logger.info(f"Client {client_id}: media upgrading to rtc (frame boundary)")
+                            await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'rtc', 'route': 'rtc'}))
                         else:
                             await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'ws'}))
                     else:
                         await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'ws'}))
 
                 elif msg_type == 'rtc-downgrade':
-                    # Client asks to fall back: switch media sender back to WS
-                    # and close the RTC session so aiortc stops ICE retries.
+                    # Client asks to fall back: switch back to WS but KEEP RTC
+                    # session alive so re-switch is instant (no re-handshake).
                     if rdp_bridge:
-                        ws_sender = WebSocketSender(websocket)
-                        rdp_bridge.sender = ws_sender
+                        rdp_bridge.request_sender_switch(WebSocketSender(websocket))
                         _rtc_bridges.pop(client_id, None)
-                        try:
-                            await ws_sender.send_bytes(
-                                build_reset_graphics(rdp_bridge.config.width,
-                                                     rdp_bridge.config.height))
-                        except Exception:
-                            pass
-                        logger.info(f"Client {client_id}: media downgraded to WS")
-                    try:
-                        await rtc_manager.close(client_id)
-                    except Exception:
-                        pass
+                        logger.info(f"Client {client_id}: media downgrading to WS (frame boundary)")
                     await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'ws'}))
+
+                elif msg_type == 'rtc-keepalive':
+                    rtc_manager.touch(client_id)
 
                 else:
                     logger.warning(f"Unknown message type: {msg_type}")
@@ -447,6 +492,9 @@ async def handle_client(websocket: ServerConnection):
     
     finally:
         # Cleanup
+        task = _rtc_offer_tasks.pop(client_id, None)
+        if task is not None and not task.done():
+            task.cancel()
         if rdp_bridge:
             await rdp_bridge.disconnect()
         if websocket in sessions:

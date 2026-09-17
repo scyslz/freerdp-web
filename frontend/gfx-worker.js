@@ -119,6 +119,9 @@ const MAX_PENDING_OPS = 64;
 /** @type {number} Total frames decoded - sent in FACK for MS-RDPEGFX compliance */
 let totalFramesDecoded = 0;
 
+/** @type {Promise|null} Resolves when WASM decoders finish init (success or fail) */
+let wasmInitPromise = null;
+
 // ============================================================================
 // Codec IDs (matching rdp_bridge.h RdpGfxCodecId enum)
 // ============================================================================
@@ -1447,7 +1450,11 @@ async function processMessage(event) {
             break;
             
         case 'binary':
-            // Binary message from WebSocket - process in order
+            // Binary message from WebSocket - process in order.
+            // Wait for WASM init: tiles arriving earlier would be skipped.
+            if (wasmInitPromise) {
+                try { await wasmInitPromise; } catch {}
+            }
             if (data instanceof ArrayBuffer) {
                 const handled = await handleBinaryMessage(data);
                 if (!handled) {
@@ -1551,11 +1558,11 @@ self.onmessage = (event) => {
 // Worker startup - initialize WASM before reporting ready
 // ============================================================================
 
-(async () => {
+wasmInitPromise = (async () => {
     // Load WASM decoders at worker startup so we know immediately if they work
     await initWasm();
     await initClearCodecWasm();
-    
+
     // Report that worker is loaded with WASM status
     self.postMessage({ type: 'loaded', wasmReady, clearWasmReady });
 })();

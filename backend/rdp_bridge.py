@@ -494,6 +494,7 @@ class RDPBridge:
             from transport import WebSocketSender
             self.sender = WebSocketSender(websocket) if websocket is not None else None
         self.websocket = websocket
+        self._pending_sender = None
         self._session: Optional[c_void_p] = None
         self._lib: Optional[NativeLibrary] = None
         self.running = False
@@ -622,11 +623,22 @@ class RDPBridge:
             
             result = self._lib.rdp_resize(self._session, width, height)
             return result == 0
-            
+
         except Exception as e:
             logger.error(f"Resize error: {e}")
             return False
-    
+
+    def request_sender_switch(self, sender) -> None:
+        """Switch media sender at the next frame boundary (no fake RSGR).
+
+        Never inject a synthetic ResetGraphics: the RDP server doesn't know
+        about it, so it won't resend CreateSurface and the client's surfaces
+        stay deleted (unknown surface / C2S MISS spam).
+        """
+        if sender is None or sender is self.sender:
+            return
+        self._pending_sender = sender
+
     def send_frame_ack(self, frame_id: int, total_frames_decoded: int, queue_depth: int = 0) -> bool:
         """Send a frame acknowledgment to the RDP server.
 
@@ -929,6 +941,12 @@ class RDPBridge:
                         # Mark frame as completed - stop processing until next poll
                         # This ensures we don't send StartFrame(N+1) before all data is ready
                         frame_completed = True
+                        # Frame boundary: safe point to switch transports.
+                        # Both sides see identical streams, no RSGR needed.
+                        if self._pending_sender is not None:
+                            self.sender = self._pending_sender
+                            self._pending_sender = None
+                            logger.info(f"Media sender switched at frame {current_frame_id}")
                 
                 # Note: H264/Progressive frames are now in GFX queue as VIDEO_FRAME events,
                 # so no separate H264 queue draining is needed.
