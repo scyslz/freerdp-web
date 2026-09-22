@@ -1224,10 +1224,11 @@ class RDPBridge:
         meta: bool = False
     ):
         """Send keyboard event to VM
-        
-        Uses Unicode input for printable characters to support international
-        keyboard layouts (e.g., German QWERTZ). Falls back to scancodes for
-        special keys, modifiers, and key combinations.
+
+        Physical keys use scancodes so the *remote* IME sees pinyin
+        keystrokes and composes CJK itself — the client only needs to be
+        in English. Unicode input is only a fallback for committed IME
+        text / characters with no scancode (CJK, €, ß, …).
         """
         if not self.running:
             return
@@ -1239,22 +1240,27 @@ class RDPBridge:
             # Build flags
             flags = RDP_KBD_FLAG_DOWN if action == 'down' else RDP_KBD_FLAG_RELEASE
             
-            # Determine if we should use Unicode input:
-            # - Single printable character (not a special key name)
-            # - No modifier keys held (except Shift which is already reflected in key)
-            # - Not a special key code
-            use_unicode = (
-                len(key) == 1 and  # Single character
-                not ctrl and not alt and not meta and  # No modifiers (Shift is OK)
-                code not in EXTENDED_KEYS and  # Not an extended key
-                code not in ('Tab', 'Enter', 'Backspace', 'Escape', 'Space',
-                            'CapsLock', 'NumLock', 'ScrollLock')
-            )
+            # Unicode fallback only when there is no physical scancode for
+            # this key, or the char can't be produced from a US scancode
+            # (committed CJK, AltGr symbols, …). ASCII keys with a known
+            # scancode must go through as scancodes so the remote IME can
+            # do pinyin composition.
+            use_unicode = False
+            if (
+                isinstance(key, str) and len(key) == 1
+                and not ctrl and not alt and not meta
+                and code not in ('Tab', 'Enter', 'Backspace', 'Escape',
+                                 'CapsLock', 'NumLock', 'ScrollLock')
+            ):
+                cp = ord(key)
+                if cp > 0xFFFF:
+                    return
+                if cp > 127 or code not in SCANCODE_MAP:
+                    use_unicode = True
             
             if use_unicode:
-                # Use Unicode keyboard event for proper international layout support
-                unicode_char = ord(key)
-                self._lib.rdp_send_unicode(self._session, flags, unicode_char)
+                # Committed text (local IME result, AltGr symbol, CJK, …)
+                self._lib.rdp_send_unicode(self._session, flags, ord(key))
             else:
                 # Use scancode for special keys and key combinations
                 scancode = SCANCODE_MAP.get(code)
