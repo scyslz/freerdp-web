@@ -315,6 +315,60 @@ const STYLES = `
     to { transform: rotate(360deg); }
 }
 
+/* Idle state (not connecting/reconnecting): show a "+" affordance instead of a
+   spinning loader. Clicking it opens the connection modal to add another host. */
+.rdp-plus {
+    display: none;
+    width: 58px;
+    height: 58px;
+    margin: 0 auto 14px;
+    align-items: center;
+    justify-content: center;
+    border: 2px solid var(--rdp-accent);
+    border-radius: 50%;
+    color: var(--rdp-accent);
+    box-shadow: 0 0 0 0 rgba(81, 207, 102, 0.35);
+    transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.rdp-plus svg {
+    width: 28px;
+    height: 28px;
+    display: block;
+}
+
+.rdp-loading.idle .rdp-spinner { display: none; }
+.rdp-loading.idle .rdp-plus { display: flex; }
+.rdp-loading.idle:hover .rdp-plus {
+    background: var(--rdp-accent);
+    color: var(--rdp-surface);
+    transform: scale(1.06);
+    box-shadow: 0 0 0 8px rgba(81, 207, 102, 0.12);
+}
+
+/* Hidden, focusable text field that captures IME composition (CJK / dead keys).
+   It must be an editable element for the browser IME to deliver characters. */
+.rdp-ime {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 1px;
+    height: 1px;
+    min-width: 1px;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: transparent;
+    caret-color: transparent;
+    resize: none;
+    overflow: hidden;
+    opacity: 0;
+    z-index: 1;
+    font-size: 16px; /* prevent iOS zoom-on-focus */
+}
+
 /* Bottom Bar */
 .rdp-bottombar {
     background: var(--rdp-surface);
@@ -640,10 +694,12 @@ const TEMPLATE = `
 
     <div class="rdp-screen-wrapper">
         <div class="rdp-screen">
-            <div class="rdp-loading">
+            <div class="rdp-loading idle">
                 <div class="rdp-spinner"></div>
+                <div class="rdp-plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></div>
                 <p>Click Connect to start</p>
             </div>
+            <textarea class="rdp-ime" aria-hidden="true" tabindex="0" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
             <canvas class="rdp-canvas" width="1280" height="720" style="display: none;"></canvas>
             
             <!-- API Cursor Overlay - shown when using programmatic mouse methods -->
@@ -1120,6 +1176,7 @@ export class RDPClient {
         this._reconnectAttempts = 0;
         this._manualDisconnect = false;
         this._lastCredentials = null;
+        this._composing = false;
     }
 
     _bindElements() {
@@ -1130,6 +1187,7 @@ export class RDPClient {
             screen: $('.rdp-screen'),
             canvas: $('.rdp-canvas'),
             loading: $('.rdp-loading'),
+            ime: $('.rdp-ime'),
             statusDot: $('.rdp-status-dot'),
             statusText: $('.rdp-status-text'),
             btnConnect: $('.rdp-btn-connect'),
@@ -1726,12 +1784,25 @@ export class RDPClient {
 
         // Canvas interactions
         this._canvas.setAttribute('tabindex', '0');
-        this._canvas.addEventListener('click', () => this._canvas.focus());
+        this._canvas.addEventListener('click', () => this._focusInput());
         this._canvas.addEventListener('mousemove', (e) => this._handleMouseMove(e));
         this._canvas.addEventListener('mousedown', (e) => this._handleMouseDown(e));
         this._canvas.addEventListener('mouseup', (e) => this._handleMouseUp(e));
         this._canvas.addEventListener('wheel', (e) => this._handleMouseWheel(e));
         this._canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // IME capture field: routes keyboard focus to a focusable editable element
+        // so CJK / dead-key composition works, then forwards committed text as Unicode.
+        if (this._el.ime) {
+            this._el.ime.addEventListener('click', () => this._focusInput());
+            this._el.ime.addEventListener('compositionstart', () => { this._composing = true; });
+            this._el.ime.addEventListener('compositionend', (e) => this._handleCompositionEnd(e));
+            // Keep the field empty so it never accumulates text; physical keys are
+            // forwarded via keydown/keyup and prevented from local echo.
+            this._el.ime.addEventListener('input', () => {
+                if (!this._composing) this._el.ime.value = '';
+            });
+        }
 
         // Keyboard - scoped to shadow root
         this._shadow.addEventListener('keydown', (e) => this._handleKeyDown(e));
@@ -1808,6 +1879,7 @@ export class RDPClient {
             this._lastCredentials = { ...credentials };
             this._updateStatus('connecting', 'Connecting...');
             this._el.loading.querySelector('p').textContent = 'Connecting...';
+            this._setLoadingMode('busy');
 
             const transport = new WsTransport(this.options.wsUrl);
             this._transport = transport;
@@ -2398,6 +2470,15 @@ export class RDPClient {
         this._el.statusText.textContent = text;
     }
 
+    /**
+     * Switch the loading area between the idle "+" affordance and the busy spinner.
+     * @param {'idle'|'busy'} mode - 'busy' while connecting/reconnecting, 'idle' otherwise
+     */
+    _setLoadingMode(mode) {
+        if (!this._el?.loading) return;
+        this._el.loading.classList.toggle('idle', mode !== 'busy');
+    }
+
     setAutoReconnect(enabled) {
         this._autoReconnect = !!enabled;
         if (!this._autoReconnect) this._clearReconnectTimer();
@@ -2433,12 +2514,19 @@ export class RDPClient {
             this._autoReconnect = false;
             this._updateReconnectBtn();
             this._updateStatus('disconnected', 'Disconnected');
+            this._setLoadingMode('idle');
+            if (this._el?.loading) this._el.loading.querySelector('p').textContent = 'Click Connect to start';
             return;
         }
         const delay = this.options.reconnectDelay || 10000;
         this._clearReconnectTimer();
         const attempt = this._reconnectAttempts + 1;
         this._updateStatus('connecting', `Reconnecting ${attempt}/${max} in ${Math.round(delay / 1000)}s...`);
+        if (this._el?.loading) {
+            this._el.loading.style.display = 'block';
+            this._el.loading.querySelector('p').textContent = `Reconnecting ${attempt}/${max} in ${Math.round(delay / 1000)}s...`;
+            this._setLoadingMode('busy');
+        }
         this._reconnectTimer = setTimeout(() => {
             this._reconnectTimer = null;
             if (!this._autoReconnect || this._manualDisconnect) return;
@@ -3502,13 +3590,14 @@ export class RDPClient {
         this._updateStatus('connected', 'Connected');
         this._el.canvas.style.display = 'block';
         this._el.loading.style.display = 'none';
+        this._setLoadingMode('idle');
         this._el.btnConnect.disabled = true;
         this._el.btnDisconnect.disabled = false;
         this._el.btnKeyboard.disabled = false;
         this._el.btnMute.disabled = false;
         this._el.btnScreenshot.disabled = false;
         this._el.btnClipboard.disabled = false;
-        this._canvas.focus();
+        this._focusInput();
 
         this._initAudio();
 
@@ -3561,6 +3650,7 @@ export class RDPClient {
         this._el.canvas.style.display = 'none';
         this._el.loading.style.display = 'block';
         this._el.loading.querySelector('p').textContent = 'Click Connect to start';
+        this._setLoadingMode('idle');
         this._el.btnConnect.disabled = false;
         this._el.btnDisconnect.disabled = true;
         this._el.btnKeyboard.disabled = true;
@@ -3626,7 +3716,7 @@ export class RDPClient {
             // or _initGfxWorkerCanvas will acquire context if transfer fails
             
             // Re-attach event listeners to new canvas
-            this._canvas.addEventListener('click', () => this._canvas.focus());
+            this._canvas.addEventListener('click', () => this._focusInput());
             this._canvas.addEventListener('mousemove', (e) => this._handleMouseMove(e));
             this._canvas.addEventListener('mousedown', (e) => this._handleMouseDown(e));
             this._canvas.addEventListener('mouseup', (e) => this._handleMouseUp(e));
@@ -4150,7 +4240,7 @@ export class RDPClient {
     _handleMouseDown(e) {
         if (!this._isConnected) return;
         e.preventDefault();
-        this._canvas.focus();
+        this._focusInput();
         
         const pos = this._getMousePos(e);
         this._sendMessage({ type: 'mouse', action: 'down', button: e.button, x: pos.x, y: pos.y });
@@ -4178,8 +4268,13 @@ export class RDPClient {
 
     _handleKeyDown(e) {
         if (!this._isConnected) return;
-        if (this._shadow.activeElement !== this._canvas) return;
-        
+        if (!this._isInputFocused()) return;
+
+        // While an IME is composing (CJK, dead keys, etc.) let the browser handle
+        // the event so the composition window works; committed text is delivered
+        // separately via _handleCompositionEnd. keyCode 229 == process key.
+        if (e.isComposing || e.keyCode === 229 || e.key === 'Process') return;
+
         e.preventDefault();
         this._sendMessage({
             type: 'key', action: 'down',
@@ -4191,8 +4286,10 @@ export class RDPClient {
 
     _handleKeyUp(e) {
         if (!this._isConnected) return;
-        if (this._shadow.activeElement !== this._canvas) return;
-        
+        if (!this._isInputFocused()) return;
+
+        if (e.isComposing || e.keyCode === 229 || e.key === 'Process') return;
+
         e.preventDefault();
         this._sendMessage({
             type: 'key', action: 'up',
@@ -4200,6 +4297,47 @@ export class RDPClient {
             ctrlKey: e.ctrlKey, shiftKey: e.shiftKey,
             altKey: e.altKey, metaKey: e.metaKey
         });
+    }
+
+    /** True when keyboard focus is on the IME field or the canvas. */
+    _isInputFocused() {
+        const ae = this._shadow.activeElement;
+        return ae === this._canvas || (this._el?.ime ? ae === this._el.ime : false);
+    }
+
+    /** Move keyboard focus to the IME capture field (creates a valid IME target). */
+    _focusInput() {
+        try {
+            if (this._el?.ime) this._el.ime.focus({ preventScroll: true });
+            else this._canvas?.focus({ preventScroll: true });
+        } catch { try { this._el.ime.focus(); } catch {} }
+    }
+
+    /**
+     * Send a committed IME string to the remote as Unicode keyboard input.
+     * The backend injects single BMP characters via rdp_send_unicode, which works
+     * regardless of the remote keyboard layout.
+     * @param {string} text
+     */
+    _sendUnicodeText(text) {
+        if (!this._isConnected || !text) return;
+        for (const ch of Array.from(text)) {
+            const cp = ch.codePointAt(0);
+            // Beyond BMP (astral / most emoji) can't be encoded in a UTF-16 Unicode
+            // keyboard event; skip to avoid sending garbage.
+            if (cp > 0xFFFF) continue;
+            this._sendMessage({ type: 'key', action: 'down', key: ch, code: '', keyCode: 0,
+                ctrlKey: false, shiftKey: false, altKey: false, metaKey: false });
+            this._sendMessage({ type: 'key', action: 'up', key: ch, code: '', keyCode: 0,
+                ctrlKey: false, shiftKey: false, altKey: false, metaKey: false });
+        }
+    }
+
+    _handleCompositionEnd(e) {
+        this._composing = false;
+        const data = (e && typeof e.data === 'string') ? e.data : (this._el?.ime?.value || '');
+        if (this._el?.ime) this._el.ime.value = '';
+        if (data) this._sendUnicodeText(data);
     }
 
     // --------------------------------------------------
