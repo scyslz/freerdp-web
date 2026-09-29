@@ -100,10 +100,10 @@ const STYLES = `
 /* Top Bar */
 .rdp-topbar {
     background: var(--rdp-surface);
-    padding: 8px 16px;
+    padding: 4px 12px;
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 10px;
     border-bottom: 1px solid var(--rdp-border);
     flex-shrink: 0;
 }
@@ -134,13 +134,13 @@ const STYLES = `
 .rdp-status {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     font-size: var(--rdp-font-size-small);
 }
 
 .rdp-status-dot {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     background: var(--rdp-error);
     transition: background 0.3s;
@@ -151,18 +151,19 @@ const STYLES = `
 .rdp-controls {
     margin-left: auto;
     display: flex;
-    gap: 8px;
+    gap: 6px;
 }
 
 .rdp-btn {
     background: var(--rdp-btn-bg);
     border: none;
     color: var(--rdp-btn-text);
-    padding: 6px 14px;
+    padding: 4px 10px;
     border-radius: var(--rdp-border-radius);
     cursor: pointer;
     font-size: var(--rdp-font-size-small);
     font-family: inherit;
+    line-height: 1.4;
     transition: background 0.2s, color 0.2s;
 }
 
@@ -179,7 +180,7 @@ const STYLES = `
 .rdp-btn-overflow {
     display: none;
     font-size: var(--rdp-font-size-small);
-    padding: 6px 10px;
+    padding: 4px 8px;
 }
 
 .rdp-btn-overflow.visible {
@@ -231,6 +232,43 @@ const STYLES = `
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 200px;
+}
+
+/* Toast - transient feedback (clipboard push, errors, ...) */
+.rdp-toast {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    transform: translate(-50%, 8px);
+    max-width: 90%;
+    padding: 7px 14px;
+    border-radius: var(--rdp-border-radius);
+    background: rgba(0, 0, 0, 0.82);
+    border: 1px solid var(--rdp-border);
+    color: var(--rdp-text);
+    font-size: var(--rdp-font-size-small);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    z-index: 200;
+}
+
+.rdp-toast.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+
+.rdp-toast.success {
+    border-color: var(--rdp-success);
+    color: var(--rdp-success);
+}
+
+.rdp-toast.error {
+    border-color: var(--rdp-error);
+    color: var(--rdp-error);
 }
 
 /* Screen Area */
@@ -701,6 +739,7 @@ const TEMPLATE = `
             </div>
             <textarea class="rdp-ime" aria-hidden="true" tabindex="0" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
             <canvas class="rdp-canvas" width="1280" height="720" style="display: none;"></canvas>
+            <div class="rdp-toast" role="status" aria-live="polite"></div>
             
             <!-- API Cursor Overlay - shown when using programmatic mouse methods -->
             <div class="rdp-api-cursor">
@@ -1177,6 +1216,7 @@ export class RDPClient {
         this._manualDisconnect = false;
         this._lastCredentials = null;
         this._composing = false;
+        this._toastTimer = null;
     }
 
     _bindElements() {
@@ -1186,6 +1226,7 @@ export class RDPClient {
             container: $('.rdp-container'),
             screen: $('.rdp-screen'),
             canvas: $('.rdp-canvas'),
+            toast: $('.rdp-toast'),
             loading: $('.rdp-loading'),
             ime: $('.rdp-ime'),
             statusDot: $('.rdp-status-dot'),
@@ -2380,6 +2421,7 @@ export class RDPClient {
         if (this._toolbarResizeObserver) {
             this._toolbarResizeObserver.disconnect();
         }
+        clearTimeout(this._toastTimer);
         this._shadow.innerHTML = '';
     }
 
@@ -2549,6 +2591,23 @@ export class RDPClient {
     }
 
     /**
+     * Show a transient message over the RDP screen
+     * @param {string} message - Text to display
+     * @param {'info'|'success'|'error'} [type='info'] - Visual variant
+     * @param {number} [duration=1800] - Visible time in ms
+     */
+    _toast(message, type = 'info', duration = 1800) {
+        const el = this._el?.toast;
+        if (!el) return;
+        el.textContent = message;
+        el.classList.remove('success', 'error');
+        if (type === 'success' || type === 'error') el.classList.add(type);
+        el.classList.add('show');
+        clearTimeout(this._toastTimer);
+        this._toastTimer = setTimeout(() => el.classList.remove('show'), duration);
+    }
+
+    /**
      * Push local clipboard text to the remote session
      * Requires a secure context (HTTPS or localhost) for clipboard read
      * @returns {Promise<boolean>} True if sent
@@ -2556,22 +2615,29 @@ export class RDPClient {
     async pushClipboard() {
         if (!this._isConnected) {
             console.warn('[RDPClient] Clipboard push: not connected');
+            this._toast('Not connected', 'error');
             return false;
         }
         try {
             if (!navigator.clipboard || !navigator.clipboard.readText) {
                 console.warn('[RDPClient] Clipboard read not available (needs HTTPS or localhost)');
+                this._toast('Clipboard needs HTTPS or localhost', 'error');
                 return false;
             }
             const text = await navigator.clipboard.readText();
             if (!text) {
                 console.warn('[RDPClient] Clipboard push: local clipboard empty');
+                this._toast('Clipboard is empty', 'error');
                 return false;
             }
             this._sendMessage({ type: 'clipboard', text });
+            const chars = Array.from(text).length;
+            this._toast(`Pasted ${chars} char${chars === 1 ? '' : 's'} to remote`, 'success');
+            this._emit('clipboardPush', { text, chars });
             return true;
         } catch (err) {
             console.warn('[RDPClient] Clipboard push failed:', err.message);
+            this._toast(`Paste failed: ${err.message}`, 'error');
             return false;
         }
     }
@@ -2584,9 +2650,12 @@ export class RDPClient {
                 return;
             }
             await navigator.clipboard.writeText(text);
+            const chars = Array.from(text).length;
+            this._toast(`Copied ${chars} char${chars === 1 ? '' : 's'} from remote`, 'success');
             this._emit('clipboard', { text });
         } catch (err) {
             console.warn('[RDPClient] Clipboard write failed:', err.message);
+            this._toast(`Copy failed: ${err.message}`, 'error');
         }
     }
 

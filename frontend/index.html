@@ -34,6 +34,19 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            max-height: 100px;
+            overflow: hidden;
+            transition: max-height 0.25s ease, padding 0.25s ease,
+                        opacity 0.2s ease, border-color 0.25s ease;
+        }
+
+        body.header-hidden .demo-header {
+            max-height: 0;
+            padding-top: 0;
+            padding-bottom: 0;
+            border-bottom-color: transparent;
+            opacity: 0;
+            pointer-events: none;
         }
 
         .demo-header h1 {
@@ -254,6 +267,8 @@ client.setTheme({
                 <li><code>'latency'</code> - Latency updated ({ latencyMs })</li>
                 <li><code>'error'</code> - Error occurred</li>
                 <li><code>'mute'</code> - Audio mute state changed</li>
+                <li><code>'clipboard'</code> - Text copied from remote ({ text })</li>
+                <li><code>'clipboardPush'</code> - Local text pushed to remote ({ chars })</li>
                 <li><code>'keyboardShow'</code> - Virtual keyboard shown</li>
                 <li><code>'keyboardHide'</code> - Virtual keyboard hidden</li>
             </ul>
@@ -282,14 +297,17 @@ client.setTheme({
 
         // Register event handlers
         client.on('connected', (data) => {
+            document.body.classList.add('header-hidden');
             console.log('Connected!', data);
         });
 
         client.on('disconnected', () => {
+            document.body.classList.remove('header-hidden');
             console.log('Disconnected');
         });
 
         client.on('error', (err) => {
+            document.body.classList.remove('header-hidden');
             console.error('Error:', err.message);
         });
 

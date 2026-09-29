@@ -2267,8 +2267,14 @@ static UINT clip_on_server_data_request(CliprdrClientContext* context, const CLI
     }
     free(text);
     resp.common.msgFlags = CB_RESPONSE_OK;
-    resp.common.dataLen = (UINT32)wi;
+    /* MS-RDPEECLIP: CF_UNICODETEXT data must include the terminating NUL,
+     * otherwise the server may truncate the last character. The buffer is
+     * zero-initialized and sized for (ulen + 1) UTF-16 code units, so the
+     * terminator always fits. */
+    resp.common.dataLen = (UINT32)wi + 2;
     resp.requestedFormatData = wbuf;
+    fprintf(stderr, "[rdp_bridge] Clipboard -> remote: %u UTF-8 bytes, %u UTF-16 bytes (format %u)\n",
+            ulen, (UINT32)wi + 2, (UINT32)req->requestedFormatId);
     UINT ret = context->ClientFormatDataResponse(context, &resp);
     free(wbuf);
     return ret;
@@ -2306,6 +2312,8 @@ static UINT clip_on_server_data_response(CliprdrClientContext* context, const CL
     }
     out[oi] = '\0';
     if (oi > 0) clip_queue_text(ctx, out, (uint32_t)oi);
+    fprintf(stderr, "[rdp_bridge] Clipboard <- remote: %u UTF-16 bytes -> %zu UTF-8 bytes\n",
+            resp->common.dataLen, oi);
     free(out);
     return CHANNEL_RC_OK;
 }
