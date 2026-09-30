@@ -283,6 +283,8 @@ async def handle_client(websocket: ServerConnection):
     logger.info(f"Client {client_id} connected from {websocket.remote_address}")
 
     rdp_bridge: Optional[RDPBridge] = None
+    _close_code = None
+    _close_reason = ''
     
     try:
         async for message in websocket:
@@ -294,7 +296,9 @@ async def handle_client(websocket: ServerConnection):
                 
                 data = json.loads(message)
                 msg_type = data.get('type')
-                
+                if msg_type not in ('ping', 'rtc-keepalive', 'mouse', 'key'):
+                    logger.info(f"Client {client_id} recv msg: {msg_type}")
+
                 if msg_type == 'connect':
                     if not all(k in data for k in ('host', 'username', 'password')):
                         logger.info(f"Client {client_id} missing required fields for connect")
@@ -391,6 +395,12 @@ async def handle_client(websocket: ServerConnection):
                         pong['seq'] = data['seq']
                     await websocket.send(json.dumps(pong))
 
+                elif msg_type == 'refresh':
+                    # Client detected dropped/stale frames (network switch or
+                    # degradation) and asks the session to resend a full frame.
+                    if rdp_bridge:
+                        rdp_bridge.request_refresh()
+
                 elif msg_type == 'clipboard':
                     if rdp_bridge:
                         text = data.get('text', '')
@@ -449,15 +459,16 @@ async def handle_client(websocket: ServerConnection):
                 elif msg_type == 'rtc-upgrade':
                     # Client says DC is open: queue sender switch at next frame
                     # boundary. Session stays alive for instant re-switch.
-                    if rdp_bridge and rtc_manager.has_session(client_id):
-                        sender = rtc_manager.get_media_sender(client_id)
-                        if sender is not None:
-                            rdp_bridge.request_sender_switch(sender)
-                            _rtc_bridges[client_id] = rdp_bridge
-                            logger.info(f"Client {client_id}: media upgrading to rtc (frame boundary)")
-                            await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'rtc', 'route': 'rtc'}))
-                        else:
-                            await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'ws'}))
+                    # Briefly wait for the offer handling to finish so we don't
+                    # race the media channel becoming ready (avoids WS flap).
+                    sender = None
+                    if rdp_bridge:
+                        sender = await rtc_manager.wait_media_sender(client_id, timeout=2.0)
+                    if rdp_bridge and sender is not None:
+                        rdp_bridge.request_sender_switch(sender)
+                        _rtc_bridges[client_id] = rdp_bridge
+                        logger.info(f"Client {client_id}: media upgrading to rtc (frame boundary)")
+                        await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'rtc', 'route': 'rtc'}))
                     else:
                         await websocket.send(json.dumps({'type': 'rtc-active', 'transport': 'ws'}))
 
@@ -491,6 +502,13 @@ async def handle_client(websocket: ServerConnection):
         logger.error(f"Client {client_id} error: {e}")
     
     finally:
+        # Record the WebSocket close code for diagnosing early drops.
+        try:
+            _close_code = websocket.close_code
+            _close_reason = websocket.close_reason
+            logger.info(f"Client {client_id} WS closed: code={_close_code} reason={_close_reason!r}")
+        except Exception:
+            pass
         # Cleanup
         task = _rtc_offer_tasks.pop(client_id, None)
         if task is not None and not task.done():

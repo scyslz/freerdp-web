@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import queue
 import struct
 from ctypes import (
     POINTER, Structure, c_bool, c_char_p, c_int, c_int32, c_uint8,
@@ -495,6 +496,13 @@ class RDPBridge:
             self.sender = WebSocketSender(websocket) if websocket is not None else None
         self.websocket = websocket
         self._pending_sender = None
+        # Serializes resize and media sender switches: doing both at once makes
+        # the remote host reset the RDP transport (seen as first-connect drop).
+        self._layout_lock = asyncio.Lock()
+        # Native calls that touch the RDP transport (frame ACK, resize) MUST run
+        # on the same thread that drives rdp_poll. This queue is drained inside
+        # the frame loop; the asyncio thread only enqueues.
+        self._cmd_queue: 'queue.Queue' = queue.Queue(maxsize=64)
         self._session: Optional[c_void_p] = None
         self._lib: Optional[NativeLibrary] = None
         self.running = False
@@ -612,20 +620,42 @@ class RDPBridge:
             if self.config.width == width and self.config.height == height:
                 logger.debug(f"Skipping redundant resize to {width}x{height}")
                 return True
-            
-            logger.info(f"Resizing session to {width}x{height}")
-            
-            self.config.width = width
-            self.config.height = height
-            
-            if not self._session or not self._lib:
-                return False
-            
-            result = self._lib.rdp_resize(self._session, width, height)
-            return result == 0
+
+            # Serialize against media sender switches. A resize racing an RTC
+            # sender switch makes the remote host reset the RDP transport.
+            async with self._layout_lock:
+                if self._pending_sender is not None:
+                    # Let the frame-boundary switch apply first.
+                    await asyncio.sleep(0.4)
+                logger.info(f"Resizing session to {width}x{height}")
+                self.config.width = width
+                self.config.height = height
+                if not self._session or not self._lib:
+                    return False
+                # rdp_resize only sets a native flag, but keep it on the poll
+                # thread too for consistency/safety.
+                return self._enqueue_native('resize', width, height)
 
         except Exception as e:
             logger.error(f"Resize error: {e}")
+            return False
+
+    def request_refresh(self) -> bool:
+        """Ask the session to resend a full frame after dropped/stale output.
+
+        Uses the native bridge refresh hook when available; otherwise this is a
+        no-op (the frontend also repaints from its last known surfaces).
+        """
+        if not self._session or not self._lib:
+            return False
+        fn = getattr(self._lib, 'rdp_gfx_request_refresh', None)
+        if fn is None:
+            logger.debug("Refresh requested but native refresh hook unavailable")
+            return False
+        try:
+            return fn(self._session) == 0
+        except Exception as e:
+            logger.debug(f"Refresh error: {e}")
             return False
 
     def request_sender_switch(self, sender) -> None:
@@ -662,13 +692,10 @@ class RDPBridge:
         if not self._session or not self._lib:
             logger.warning("Cannot send frame ACK: session not active")
             return False
-        
-        try:
-            result = self._lib.rdp_gfx_send_frame_ack(self._session, frame_id, total_frames_decoded, queue_depth)
-            return result == 0
-        except Exception as e:
-            logger.error(f"Frame ACK error: {e}")
-            return False
+
+        # Enqueue: the actual native call must run on the rdp_poll thread,
+        # otherwise it races the transport and the RDP socket gets reset.
+        return self._enqueue_native('fack', frame_id, total_frames_decoded, queue_depth)
 
     def send_clipboard_text(self, text: str) -> bool:
         """Push browser clipboard text to the Windows session."""
@@ -679,8 +706,7 @@ class RDPBridge:
             data = text.encode('utf-8')
             if not data or len(data) > 1024 * 1024:
                 return False
-            result = self._lib.rdp_clipboard_set_text(self._session, data, len(data))
-            return result == 0
+            return self._enqueue_native('clipboard', data)
         except Exception as e:
             logger.error(f"Clipboard send error: {e}")
             return False
@@ -870,6 +896,54 @@ class RDPBridge:
             # Unhandled event type
             return None
     
+    def _enqueue_native(self, kind: str, *args) -> bool:
+        """Queue a native call to run on the rdp_poll thread."""
+        if not self._session or not self._lib:
+            return False
+        try:
+            self._cmd_queue.put_nowait((kind, *args))
+            return True
+        except queue.Full:
+            logger.debug(f"Native command queue full, dropping {kind}")
+            return False
+
+    def _native_poll_and_drain(self, timeout_ms: int) -> int:
+        """Run rdp_poll and any queued native commands on one thread.
+
+        FreeRDP is not thread-safe: frame ACKs, resize and refresh must all be
+        issued from the thread that drives rdp_poll, otherwise the transport
+        races and the RDP socket is reset by the peer.
+        """
+        # Drain pending commands first (small, bounded).
+        while True:
+            try:
+                cmd = self._cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                kind = cmd[0]
+                if kind == 'fack':
+                    _, frame_id, total_decoded, qdepth = cmd
+                    self._lib.rdp_gfx_send_frame_ack(self._session, frame_id, total_decoded, qdepth)
+                elif kind == 'resize':
+                    _, w, h = cmd
+                    self._lib.rdp_resize(self._session, w, h)
+                elif kind == 'mouse':
+                    _, flags, x, y = cmd
+                    self._lib.rdp_send_mouse(self._session, flags, x, y)
+                elif kind == 'unicode':
+                    _, flags, code = cmd
+                    self._lib.rdp_send_unicode(self._session, flags, code)
+                elif kind == 'keyboard':
+                    _, flags, scancode = cmd
+                    self._lib.rdp_send_keyboard(self._session, flags, scancode)
+                elif kind == 'clipboard':
+                    _, data = cmd
+                    self._lib.rdp_clipboard_set_text(self._session, data, len(data))
+            except Exception as e:
+                logger.error(f"Queued native command error: {e}")
+        return self._lib.rdp_poll(self._session, timeout_ms)
+
     async def _stream_frames(self):
         """Stream frames from native library - GFX event streaming with wire format"""
         logger.info("Starting frame streaming")
@@ -884,9 +958,10 @@ class RDPBridge:
         
         while self.running:
             try:
-                # Poll for events (non-blocking)
+                # Run rdp_poll AND any queued native commands on the same
+                # executor thread so all FreeRDP calls are serialized.
                 result = await asyncio.get_event_loop().run_in_executor(
-                    None, self._lib.rdp_poll, self._session, 16  # 16ms timeout
+                    None, self._native_poll_and_drain, 16
                 )
                 
                 poll_count += 1                
@@ -1198,7 +1273,7 @@ class RDPBridge:
                     else:
                         rotation_bits = rotation & 0xFF
                     flags = RDP_MOUSE_FLAG_WHEEL | rotation_bits
-                    self._lib.rdp_send_mouse(self._session, flags, x, y)
+                    self._enqueue_native('mouse', flags, x, y)
                 
                 # Handle horizontal wheel (separate event per RDP spec)
                 if h_delta != 0:
@@ -1208,11 +1283,11 @@ class RDPBridge:
                     else:
                         rotation_bits = rotation & 0xFF
                     flags = RDP_MOUSE_FLAG_HWHEEL | rotation_bits
-                    self._lib.rdp_send_mouse(self._session, flags, x, y)
+                    self._enqueue_native('mouse', flags, x, y)
                 
                 return  # Already sent mouse events above                
             
-            self._lib.rdp_send_mouse(self._session, flags, x, y)
+            self._enqueue_native('mouse', flags, x, y)
             
         except Exception as e:
             logger.error(f"Mouse event error: {e}")
@@ -1260,7 +1335,7 @@ class RDPBridge:
             
             if use_unicode:
                 # Committed text (local IME result, AltGr symbol, CJK, …)
-                self._lib.rdp_send_unicode(self._session, flags, ord(key))
+                self._enqueue_native('unicode', flags, ord(key))
             else:
                 # Use scancode for special keys and key combinations
                 scancode = SCANCODE_MAP.get(code)
@@ -1273,7 +1348,7 @@ class RDPBridge:
                 if code in EXTENDED_KEYS:
                     flags |= RDP_KBD_FLAG_EXTENDED
                 
-                self._lib.rdp_send_keyboard(self._session, flags, scancode)
+                self._enqueue_native('keyboard', flags, scancode)
             
         except Exception as e:
             logger.error(f"Key event error: {e}")

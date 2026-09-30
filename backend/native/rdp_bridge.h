@@ -500,6 +500,17 @@ uint16_t rdp_gfx_get_primary_surface(RdpSession* session);
  */
 int rdp_gfx_send_frame_ack(RdpSession* session, uint32_t frame_id, uint32_t total_frames_decoded, uint32_t queue_depth);
 
+/**
+ * Request a full-screen refresh from the RDP server.
+ *
+ * Sends a RefreshRect PDU covering the whole desktop. Used by the browser
+ * after network path switches or packet loss to recover dropped/stale frames.
+ *
+ * @param session   Session handle
+ * @return          0 on success, -1 on error/unavailable
+ */
+int rdp_gfx_request_refresh(RdpSession* session);
+
 /* ============================================================================
  * GFX Event Queue API (for wire format streaming)
  * ============================================================================ */

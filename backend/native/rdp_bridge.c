@@ -1562,7 +1562,7 @@ int rdp_poll(RdpSession* session, int timeout_ms)
     pthread_mutex_lock(&ctx->gfx_mutex);
     bool gfx_initializing = ctx->gfx_pipeline_needs_init && !ctx->gfx_pipeline_ready;
     pthread_mutex_unlock(&ctx->gfx_mutex);
-    
+
     if (ctx->resize_pending && !gfx_initializing) {
         ctx->resize_pending = false;
         
@@ -3638,6 +3638,30 @@ int rdp_gfx_send_frame_ack(RdpSession* session, uint32_t frame_id, uint32_t tota
         return -1;
     }
     
+    return 0;
+}
+
+/*
+ * NOTE: A direct RefreshRect is intentionally NOT sent here.
+ *
+ * In this bridge we run GFX in "wire-through" mode: the update channel is
+ * driven by rdp_poll and the desktop is repainted by the server, not by us.
+ * Calling context->update->RefreshRect (or update_send_refresh_rect) crashes
+ * inside libfreerdp3 because the update send path requires the full update
+ * lock/state that is only valid from within FreeRDP's own callback context.
+ *
+ * Screen recovery after a path switch/packet loss is handled client-side by
+ * the GFX worker (it repaints from the last known surfaces and waits for the
+ * next H.264 keyframe). The server also sends a full frame after a sender
+ * switch. So this hook is deliberately a no-op.
+ */
+int rdp_gfx_request_refresh(RdpSession* session)
+{
+    if (!session) return -1;
+    rdpContext* context = (rdpContext*)session;
+    BridgeContext* ctx = (BridgeContext*)context;
+    if (ctx->state != RDP_STATE_CONNECTED) return -1;
+    /* Client-side repaint covers recovery; nothing to send from here. */
     return 0;
 }
 

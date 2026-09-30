@@ -1238,6 +1238,14 @@ async function endFrame(frameId) {
     if (currentFrameId !== frameId) {
         console.warn(`[GFX Worker] Frame mismatch: expected ${currentFrameId}, got ${frameId}`);
     }
+    // Detect a real wire-level gap: completed frame IDs should be contiguous.
+    // Start/end mismatch alone is noisy (frames without StartFrame, interleaving)
+    // and must not be treated as loss.
+    if (lastCompletedFrameId !== null && frameId > lastCompletedFrameId + 1) {
+        const missing = frameId - lastCompletedFrameId - 1;
+        console.warn(`[GFX Worker] Frame gap: ${missing} frame(s) missed (${lastCompletedFrameId} -> ${frameId})`);
+        self.postMessage({ type: 'frameGap', expected: lastCompletedFrameId + 1, got: frameId, missing });
+    }
 
     // Composite all mapped surfaces that were updated in this frame to primary canvas
     // Per MS-RDPEGFX: Each mapped surface is drawn at its (outputX, outputY) position
@@ -1505,6 +1513,29 @@ async function processMessage(event) {
             console.log('[GFX Worker] Session reset complete');
             break;
             
+        case 'refresh':
+            // Network/path recovery: force decoder back to keyframe-wait state and
+            // repaint the primary canvas from the latest known mapped surfaces so
+            // dropped/stale frames don't leave the screen frozen.
+            h264NeedsKeyframe = true;
+            h264DecoderError = false;
+            h264DecodeQueue = [];
+            if (primaryCanvas && primaryCtx) {
+                primaryCtx.fillStyle = '#000000';
+                primaryCtx.fillRect(0, 0, primaryCanvas.width, primaryCanvas.height);
+                const mapped = Array.from(mappedSurfaces.entries()).sort((a, b) => a[0] - b[0]);
+                for (const [surfaceId, mapping] of mapped) {
+                    const surface = surfaces.get(surfaceId);
+                    if (surface) primaryCtx.drawImage(surface.canvas, mapping.outputX, mapping.outputY);
+                }
+                if (!mapped.length && primarySurfaceId !== null) {
+                    const surface = surfaces.get(primarySurfaceId);
+                    if (surface) primaryCtx.drawImage(surface.canvas, 0, 0);
+                }
+            }
+            self.postMessage({ type: 'refreshed', at: Date.now() });
+            break;
+
         case 'screenshot':
             // Capture current canvas content and return as blob
             if (primaryCanvas) {

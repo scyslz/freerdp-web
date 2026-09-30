@@ -181,6 +181,24 @@ class WebRTCManager:
             return None
         return DataChannelSender(lambda s=sess: s.media_channel)
 
+    async def wait_media_sender(self, client_id: int, route: str = 'rtc', timeout: float = 2.0):
+        """Wait briefly for a media channel to become ready before giving up.
+
+        The browser sends 'rtc-upgrade' as soon as its datachannel opens, which
+        can race the server-side offer handling. Waiting avoids a spurious
+        "transport: ws" reply that would make the client flap back to WS.
+        """
+        sess = self._sessions.get(self._key(client_id, route))
+        if sess is None:
+            return None
+        try:
+            await asyncio.wait_for(sess.ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        if sess.media_channel is None:
+            return None
+        return DataChannelSender(lambda s=sess: s.media_channel)
+
     def get_session(self, client_id: int, route: str = 'rtc') -> Optional[RtcPendingSession]:
         return self._sessions.get(self._key(client_id, route))
 

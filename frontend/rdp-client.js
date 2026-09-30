@@ -942,6 +942,7 @@ export class RDPClient {
      * @param {boolean} [options.loadingSpinnerOpensModal=true] - Whether clicking the loading area opens the connection modal
      * @param {number} [options.minWidth=0] - Minimum canvas width in pixels (0 = no minimum, scrollbar appears if container is smaller)
      * @param {number} [options.minHeight=0] - Minimum canvas height in pixels (0 = no minimum, scrollbar appears if container is smaller)
+     * @param {number} [options.maxPixelRatio=2] - Cap on devicePixelRatio used to request a 1:1 physical-pixel session resolution (1 = CSS pixels only)
      * @param {import('./rdp-themes.js').RDPTheme} [options.theme] - Theme configuration
      * @param {import('./rdp-security.js').SecurityPolicy} [options.securityPolicy] - Security policy for connection restrictions
      * @param {Object} [options.visibleTopBarButtons] - Control visibility of top bar buttons
@@ -964,6 +965,7 @@ export class RDPClient {
             showBottomBar: true,
             mouseThrottleMs: 16,
             resizeDebounceMs: 2000,
+            maxPixelRatio: 2,   // Cap on devicePixelRatio used for 1:1 physical-pixel resolution (keeps 4K/retina frames sane)
             keepConnectionModalOpen: false,
             loadingSpinnerOpensModal: true,
             minWidth: 0,    // Minimum canvas width (0 = no minimum, scrollbar appears if container is smaller)
@@ -1112,7 +1114,6 @@ export class RDPClient {
         this._canvas = null;
         this._ctx = null;
         this._lastMouseSend = 0;
-        this._pingStart = 0;
         this._lastLatency = null;
         this._mediaPath = 'ws';
         this._rtc = null;
@@ -1122,9 +1123,17 @@ export class RDPClient {
         this._rtcFailCount = 0;
         this._rtcGiveUp = false;
         this._rtcMaxRetries = 3;
-        this._wsQuality = { sent: 0, lost: 0, jitterMs: null, lossPct: null, lastRtt: null };
+        this._wsQuality = { sent: 0, lost: 0, jitterMs: null, lossPct: null, lastRtt: null, window: [] };
         this._pingSeq = 0;
         this._pingPending = new Map();
+        this._rttTimes = [];
+        this._rttValues = [];
+        this._rtcRttTimes = [];
+        this._rtcRttValues = [];
+        this._rtcRttTimes = [];
+        this._rtcRttValues = [];
+        this._pingIntervalMs = this.options.pingIntervalMs || 2000;
+        this._pingTimeoutMs = this.options.pingTimeoutMs || 3000;
         const queryMode = getTransportModeFromQuery();
         const initRouteRaw = this.options.routeMode || this.options.transportMode || queryMode || this.options.transport || 'auto';
         const initRoute = (initRouteRaw === 'p2p' || initRouteRaw === 'turn') ? 'rtc' : initRouteRaw;
@@ -1145,6 +1154,7 @@ export class RDPClient {
         this._iceServersReady = null;
         this._pendingRtc = null;
         this._standbyRtc = null;
+        this._rtcDialing = null;
         this._routeStats = {
             ws: { rttMs: null, lossPct: null, jitterMs: null, score: null, updatedAt: 0 },
             rtc: { rttMs: null, lossPct: null, jitterMs: null, score: null, updatedAt: 0 },
@@ -1154,6 +1164,13 @@ export class RDPClient {
         this._keepaliveMs = this.options.keepaliveMs || 20000;
         this._lastAutoSwitchAt = 0;
         this._autoCooldownMs = this.options.autoCooldownMs || 15000;
+        this._autoWarmupMs = this.options.autoWarmupMs || 8000;
+        this._connectedAt = 0;
+        this._lastFrameGapAt = 0;
+        this._frameGapCount = 0;
+        this._lastRefreshAt = 0;
+        this._graceMs = this.options.rtcGraceMs || 4000;
+        this._graceTimer = null;
         this._resizeTimeout = null;
         this._lastRequestedWidth = 0;
         this._lastRequestedHeight = 0;
@@ -1669,12 +1686,19 @@ export class RDPClient {
                 this._pendingGfxMessages = [];
                 break;
                 
-            case 'frameAck':
-                // Send frame acknowledgment back to server (RTC control DC preferred)
-                if (msg.data) {
-                    this._sendBinary(msg.data);
-                }
-                break;
+                case 'frameAck':
+                    // Send frame acknowledgment back to server (RTC control DC preferred)
+                    if (msg.data) {
+                        this._sendBinary(msg.data);
+                    }
+                    break;
+
+                case 'frameGap':
+                    // Decoder saw a gap -> real frame loss, a refresh is warranted.
+                    this._lastFrameGapAt = Date.now();
+                    this._frameGapCount = (this._frameGapCount || 0) + 1;
+                    console.warn(`[RDPClient] Frame gap detected (${msg.expected} -> ${msg.got}), refresh warranted`);
+                    break;
                 
             case 'unhandled':
                 // Unhandled message from worker - process on main thread
@@ -1792,6 +1816,40 @@ export class RDPClient {
         }
         
         return true;
+    }
+
+    _forceRefresh(reason) {
+        if (!this._gfxWorker || !this._gfxWorkerReady) return;
+        this._pendingGfxMessages = [];
+        this._gfxWorker.postMessage({ type: 'refresh' });
+        try { this._sendMessage({ type: 'refresh' }); } catch {}
+        this._lastRefreshAt = Date.now();
+        if (reason) console.log(`[RDPClient] Forced screen refresh (${reason})`);
+    }
+
+    /**
+     * Decide whether a media-path switch needs a repaint. Only true when we
+     * actually lost frames: a recent decoder gap, or the currently-active link
+     * was showing real packet loss. A clean handover continues the same frame
+     * stream and needs no refresh.
+     */
+    _shouldRefreshOnSwitch() {
+        const now = Date.now();
+        if (this._lastFrameGapAt && now - this._lastFrameGapAt < 8000) return true;
+        // Require a minimum number of samples before trusting loss/jitter:
+        // the first pings after connect can spuriously time out during GFX/RTC
+        // init and would otherwise trigger a needless refresh.
+        const win = this._wsQuality.window || [];
+        const q = this._wsQuality;
+        if (win.length >= 5) {
+            if (q.lossPct != null && q.lossPct > 5) return true;
+            if (q.jitterMs != null && q.jitterMs > 200) return true;
+        }
+        const rtcSamples = this._rtcRttValues.length;
+        if (rtcSamples >= 5 && this._rtcLink && this._rtcLink.lossPct != null && this._rtcLink.lossPct > 5) {
+            return true;
+        }
+        return false;
     }
 
     _setupEventListeners() {
@@ -2277,7 +2335,7 @@ export class RDPClient {
      * @returns {number|null} Latency in ms, or null if not yet measured
      */
     getLatency() {
-        if (!this._isConnected || this._pingStart === 0) return null;
+        if (!this._isConnected) return null;
         return this._lastLatency || null;
     }
 
@@ -2718,6 +2776,10 @@ export class RDPClient {
     setRouteMode(mode) {
         if (mode === 'p2p' || mode === 'turn') mode = 'rtc';
         if (!['auto', 'ws', 'rtc'].includes(mode)) return false;
+        if (this._initialProbeTimer) {
+            clearTimeout(this._initialProbeTimer);
+            this._initialProbeTimer = null;
+        }
         if (mode === this._routeMode) {
             if (mode === 'rtc' && this._isConnected && this._mediaPath !== 'rtc') {
                 console.log('[RDPClient] WebRTC re-requested while media on ws, retrying switch');
@@ -2735,6 +2797,7 @@ export class RDPClient {
         }
         if (mode === 'ws') {
             this._downgradeToWs('manual');
+            this._toast('Route: RELAY (WS)');
         } else if (mode === 'rtc') {
             if (this._mediaPath === 'rtc') {
                 this._renderRoutePop();
@@ -2742,8 +2805,10 @@ export class RDPClient {
             }
             this._rtcFailCount = 0;
             this._rtcGiveUp = false;
+            this._toast(this._standbyRtc?.isOpen?.() ? 'Switching to WebRTC…' : 'Connecting WebRTC…');
             this._probeRtc(false);
         } else {
+            this._toast('Route: AUTO');
             this._rtcFailCount = 0;
             this._rtcGiveUp = false;
             this._maybeDowngradeRtc();
@@ -2779,8 +2844,9 @@ export class RDPClient {
         if (ws.rttMs !== null) {
             out.ws = { rttMs: ws.rttMs, lossPct: ws.lossPct, jitterMs: ws.jitterMs, score: ws.score, updatedAt: Date.now() };
         }
-        if (rtc && this._rtcLink) {
+        if (rtc) {
             out.rtc = {
+                ...(out.rtc || {}),
                 rttMs: rtc.rttMs, lossPct: rtc.lossPct, jitterMs: rtc.jitterMs,
                 score: rtc.score, updatedAt: Date.now(),
             };
@@ -2880,31 +2946,47 @@ export class RDPClient {
             label = 'WebRTC…';
             title = 'WebRTC handshake in progress, media still on WS';
         }
-        badge.className = cls;
-        text.textContent = label;
-        badge.title = title;
+        // Debounce rapid label changes: coalesce brief transitional states
+        // (e.g. rtc-pending for a few hundred ms) so the badge doesn't flicker.
+        this._badgePending = { label, cls, title };
+        if (this._badgeTimer) clearTimeout(this._badgeTimer);
+        this._badgeTimer = setTimeout(() => {
+            this._badgeTimer = null;
+            const p = this._badgePending;
+            if (!p) return;
+            this._badgeLabel = p.label;
+            badge.className = p.cls;
+            text.textContent = p.label;
+            badge.title = p.title;
+        }, 400);
     }
 
     _scoreLink({ rttMs, lossPct, jitterMs }) {
+        // Missing metrics must NOT be treated as "perfect" (0), or a link with
+        // no data would look better than one with real numbers. Use neutral
+        // small penalties so WS and RTC are scored on the same footing.
         const rtt = typeof rttMs === 'number' ? rttMs : 9999;
         const loss = typeof lossPct === 'number' ? lossPct : 0;
         const jit = typeof jitterMs === 'number' ? jitterMs : 0;
-        return rtt + loss * 120 + jit * 2;
+        let score = rtt + loss * 120 + jit * 2;
+        if (typeof lossPct !== 'number') score += 10;   // unknown loss: mild penalty
+        if (typeof jitterMs !== 'number') score += 10;  // unknown jitter: mild penalty
+        return score;
     }
 
     _isStableScore(s) {
         if (!s || typeof s.rttMs !== 'number') return false;
-        if (s.lossPct !== null && s.lossPct !== undefined && s.lossPct > 5) return false;
-        if (s.jitterMs !== null && s.jitterMs !== undefined && s.jitterMs > 120) return false;
-        if (s.rttMs > 400) return false;
+        if (s.lossPct !== null && s.lossPct !== undefined && s.lossPct > 10) return false;
+        if (s.jitterMs !== null && s.jitterMs !== undefined && s.jitterMs > 200) return false;
+        if (s.rttMs > 600) return false;
         return true;
     }
 
     _isBadScore(s) {
         if (!s || typeof s.rttMs !== 'number') return false;
-        return (s.lossPct !== null && s.lossPct !== undefined && s.lossPct > 5)
-            || (s.jitterMs !== null && s.jitterMs !== undefined && s.jitterMs > 120)
-            || s.rttMs > 400;
+        return (s.lossPct !== null && s.lossPct !== undefined && s.lossPct > 10)
+            || (s.jitterMs !== null && s.jitterMs !== undefined && s.jitterMs > 200)
+            || s.rttMs > 600;
     }
 
     _autoCooldownOk() {
@@ -2916,38 +2998,93 @@ export class RDPClient {
     }
 
     _currentScores() {
-        const wsAvg = this._latSamples.length
-            ? this._latSamples.reduce((a, b) => a + b, 0) / this._latSamples.length
-            : null;
+        const wsRtt = this._recentRtt();
+        const rtcRtt = this._recentRtcRtt();
+        const rtcLive = rtcRtt != null && (
+            this._mediaPath === 'rtc'
+            || this._rtc?.isOpen?.()
+            || this._standbyRtc?.isOpen?.()
+        );
+        const rtcMetrics = rtcLive ? {
+            rttMs: rtcRtt,
+            lossPct: this._rtcLink?.lossPct ?? null,
+            jitterMs: this._rtcLink?.jitterMs ?? null,
+        } : null;
         return {
             ws: {
-                rttMs: wsAvg !== null ? Math.round(wsAvg) : null,
+                rttMs: wsRtt,
                 lossPct: this._wsQuality.lossPct,
                 jitterMs: this._wsQuality.jitterMs,
-                score: wsAvg !== null ? this._scoreLink({
-                    rttMs: wsAvg,
+                score: wsRtt !== null ? this._scoreLink({
+                    rttMs: wsRtt,
                     lossPct: this._wsQuality.lossPct,
                     jitterMs: this._wsQuality.jitterMs,
                 }) : Infinity,
             },
-            rtc: (this._mediaPath === 'rtc' && this._rtcLink?.rttMs != null) ? {
-                rttMs: this._rtcLink.rttMs,
-                lossPct: this._rtcLink.lossPct,
-                jitterMs: this._rtcLink.jitterMs,
-                score: this._scoreLink(this._rtcLink),
+            rtc: rtcMetrics ? {
+                ...rtcMetrics,
+                score: this._scoreLink(rtcMetrics),
             } : null,
         };
     }
 
+    _recentRtt() {
+        return this._medianFresh(this._rttValues, this._rttTimes, 15000,
+            typeof this._wsQuality.lastRtt === 'number' ? this._wsQuality.lastRtt : null);
+    }
+
+    _recentRtcRtt() {
+        return this._medianFresh(this._rtcRttValues, this._rtcRttTimes, 15000,
+            typeof this._rtcLink?.rttMs === 'number' ? this._rtcLink.rttMs : null);
+    }
+
+    _medianFresh(values, times, maxAgeMs, fallback) {
+        const now = performance.now();
+        const fresh = [];
+        for (let i = values.length - 1; i >= 0; i--) {
+            if (now - times[i] > maxAgeMs) break;
+            fresh.push(values[i]);
+        }
+        if (!fresh.length) return fallback;
+        fresh.sort((a, b) => a - b);
+        const mid = fresh.length >> 1;
+        return fresh.length % 2 ? fresh[mid] : Math.round((fresh[mid - 1] + fresh[mid]) / 2);
+    }
+
     _recordLatency(latency) {
         this._lastLatency = latency;
-        this._el.latency.textContent = `Latency: ${latency}ms`;
+        this._updateWsPanel();
         this._updateTransportBadge();
-        this._emit('latency', { latencyMs: latency, transport: this._mediaPath });
+        this._emit('latency', {
+            latencyMs: latency,
+            transport: this._mediaPath,
+            jitterMs: this._wsQuality.jitterMs,
+            lossPct: this._wsQuality.lossPct,
+        });
         this._latSamples.push(latency);
         if (this._latSamples.length > 12) this._latSamples.shift();
+        this._maybeRecoverScreen();
         this._maybeAutoSwitch();
         if (this._el?.routePop?.classList.contains('open')) this._renderRoutePop();
+    }
+
+    _maybeRecoverScreen() {
+        if (!this._isConnected) return;
+        // Never trigger during the connect/GFX-init warmup: the first samples
+        // are skewed by worker init and RTC dialing, not by a real bad link.
+        if (Date.now() - (this._connectedAt || 0) < (this._autoWarmupMs || 8000)) return;
+        const q = this._wsQuality;
+        const bad = (q.lossPct != null && q.lossPct > 15)
+            || (q.jitterMs != null && q.jitterMs > 250)
+            || (q.lastRtt != null && q.lastRtt > 800);
+        if (!bad) {
+            this._badStreak = 0;
+            return;
+        }
+        this._badStreak = (this._badStreak || 0) + 1;
+        if (this._badStreak < 5) return;
+        this._badStreak = 0;
+        this._forceRefresh('link-degraded');
     }
 
     _rtcCandidateScore() {
@@ -2967,6 +3104,7 @@ export class RDPClient {
         if (!this._isConnected) return;
         if (this._routeMode !== 'auto') return;
         if (this._latSamples.length < 3) return;
+        if (Date.now() - (this._connectedAt || 0) < (this._autoWarmupMs || 8000)) return;
         const { ws } = this._currentScores();
         if (ws.rttMs === null) return;
         if (this._mediaPath === 'ws') {
@@ -3060,13 +3198,19 @@ export class RDPClient {
             console.warn(`[RDPClient] RTC background probe skipped: gave up ${this._rtcFailCount}/${this._rtcMaxRetries}, click WebRTC to retry`);
             return;
         }
+        if (this._rtcDialing && this._rtcDialing !== 'stale') {
+            console.log('[RDPClient] RTC dial already in progress, joining');
+            return;
+        }
         await this._ensureIceServers();
         if (this._rtc?.isOpen?.() || this._pendingRtc || this._standbyRtc?.isOpen?.()) {
+            this._rtcDialing = null;
             if (!background) {
                 if (!this._adoptStandby()) console.warn(`[RDPClient] RTC switch skipped: race, another dial live=${!!this._rtc?.isOpen?.()} pending=${!!this._pendingRtc} standby=${!!this._standbyRtc?.isOpen?.()}`);
             }
             return;
         }
+        this._rtcDialing = true;
         const turnCount = this._iceServers.filter((e) => String(e.urls || '').startsWith('turn')).length;
         console.log(`[RDPClient] Probing RTC (STUN x${this._stunUrls.length}${turnCount ? ` + TURN x${turnCount}` : ''}${background ? ' bg' : ''})`);
         const rtc = new RtcMediaTransport(this._transport, {
@@ -3083,11 +3227,13 @@ export class RDPClient {
         rtc.oncontrol = null;
         rtc.onstate = (st) => {
             if (st === 'open') {
+                this._rtcDialing = null;
                 if (background) this._finishBackgroundProbe(rtc);
                 else this._upgradeToRtc(rtc);
             } else if (st === 'failed' || st === 'disconnected' || st === 'closed') {
                 if (isMine()) {
                     dropMine();
+                    this._rtcDialing = null;
                     if (!background) this._noteRtcFailed(st);
                 }
                 try { rtc.close(); } catch {}
@@ -3096,6 +3242,7 @@ export class RDPClient {
         rtc.onerror = () => {
             if (isMine()) {
                 dropMine();
+                this._rtcDialing = null;
                 if (!background) this._noteRtcFailed('error');
             }
             try { rtc.close(); } catch {}
@@ -3105,6 +3252,7 @@ export class RDPClient {
         } catch (e) {
             if (isMine()) {
                 dropMine();
+                this._rtcDialing = null;
                 if (!background) this._noteRtcFailed(`start-error: ${e?.message || e}`);
             }
             try { rtc.close(); } catch {}
@@ -3202,6 +3350,7 @@ export class RDPClient {
         if (!rtc) {
             if (this._isBadScore(ws) && this._autoCooldownOk() && !this._rtcGiveUp) {
                 console.log(`[RDPClient] Auto route: ws bad but no rtc stats, probing`);
+                this._markAutoSwitch();
                 this._probeRtc(true);
             }
             return;
@@ -3211,9 +3360,14 @@ export class RDPClient {
             console.log(`[RDPClient] Auto route: ws bad but rtc unstable (rtt ${rtc.rttMs}ms loss ${(rtc.lossPct ?? 0).toFixed(1)}%), staying`);
             return;
         }
-        if (!(rtc.score < ws.score * 0.85)) return;
+        // Switch only when RTC is MEASURABLY BETTER (>=15% lower score), not
+        // merely because the current WS path looks bad.
+        if (!(rtc.score < ws.score * 0.85)) {
+            console.log(`[RDPClient] Auto route: ws bad but rtc not better (ws score ${Math.round(ws.score)} vs rtc ${Math.round(rtc.score)}), staying`);
+            return;
+        }
         if (!this._autoCooldownOk()) return;
-        console.log(`[RDPClient] Auto route: WS bad score ${Math.round(ws.score)} -> rtc stable score ${Math.round(rtc.score)}, switching`);
+        console.log(`[RDPClient] Auto route: rtc clearly better (ws score ${Math.round(ws.score)} -> rtc score ${Math.round(rtc.score)}), switching`);
         this._markAutoSwitch();
         this._rtcFailCount = 0;
         this._rtcGiveUp = false;
@@ -3235,6 +3389,8 @@ export class RDPClient {
     }
 
     _closeRtc() {
+        this._rtcDialing = null;
+        if (this._graceTimer) { clearTimeout(this._graceTimer); this._graceTimer = null; }
         for (const k of ['_pendingRtc', '_standbyRtc', '_rtc']) {
             const cur = this[k];
             if (cur) {
@@ -3253,11 +3409,7 @@ export class RDPClient {
             if (sb?.isOpen?.()) {
                 const r = await sb.pingKeepalive().catch(() => null);
                 if (r && typeof r.rttMs === 'number') {
-                    this._routeStats.rtc = {
-                        ...(this._routeStats.rtc || {}),
-                        rttMs: r.rttMs, updatedAt: Date.now(),
-                        score: this._scoreLink({ rttMs: r.rttMs, lossPct: this._routeStats.rtc?.lossPct ?? 0, jitterMs: this._routeStats.rtc?.jitterMs ?? 0 }),
-                    };
+                    this._recordRtcRouteStat(r.rttMs, null, null);
                 }
             }
             if (this._el?.routePop?.classList.contains('open')) this._renderRoutePop();
@@ -3268,25 +3420,11 @@ export class RDPClient {
             if (sb) {
                 const r = await sb.pingKeepalive().catch(() => null);
                 if (r && typeof r.rttMs === 'number') {
-                    const prev = this._routeStats.rtc || {};
-                    const rttMs = r.rttMs;
-                    const lossPct = prev.lossPct ?? 0;
-                    const jitterMs = prev.jitterMs ?? 0;
-                    this._routeStats.rtc = {
-                        ...prev, rttMs, lossPct, jitterMs,
-                        score: this._scoreLink({ rttMs, lossPct, jitterMs }),
-                        updatedAt: Date.now(),
-                    };
+                    this._recordRtcRouteStat(r.rttMs, null, null);
                 } else {
                     const info = await sb.getSelectedCandidateInfo?.().catch(() => null);
                     if (info && typeof info.rttMs === 'number') {
-                        const lossPct = info.lossPct ?? this._routeStats.rtc?.lossPct ?? 0;
-                        const jitterMs = info.jitterMs ?? this._routeStats.rtc?.jitterMs ?? 0;
-                        this._routeStats.rtc = {
-                            rttMs: info.rttMs, lossPct, jitterMs,
-                            score: this._scoreLink({ rttMs: info.rttMs, lossPct, jitterMs }),
-                            updatedAt: Date.now(),
-                        };
+                        this._recordRtcRouteStat(info.rttMs, info.lossPct, info.jitterMs);
                     }
                 }
             }
@@ -3304,6 +3442,10 @@ export class RDPClient {
         if (!['ws', 'rtc'].includes(route)) {
             console.warn(`[RDPClient] Switch route ignored: bad route=${route}`);
             return false;
+        }
+        if (this._initialProbeTimer) {
+            clearTimeout(this._initialProbeTimer);
+            this._initialProbeTimer = null;
         }
         if (!this._isConnected) {
             console.warn(`[RDPClient] Switch route to ${route} failed: RDP not connected`);
@@ -3350,7 +3492,9 @@ export class RDPClient {
             if (this._pendingRtc === rtc) this._pendingRtc = null;
             return;
         }
+        if (this._graceTimer) { clearTimeout(this._graceTimer); this._graceTimer = null; }
         this._rtc = rtc;
+        this._upgradeRetries = 0;
         if (this._standbyRtc === rtc) this._standbyRtc = null;
         if (this._pendingRtc === rtc) this._pendingRtc = null;
         this._mediaPath = 'rtc-pending';
@@ -3361,18 +3505,44 @@ export class RDPClient {
         };
         rtc.oncontrol = null;
         const onDead = (why) => {
-            if (this._activeLink() === rtc || this._rtc === rtc) {
+            if (this._graceTimer) { clearTimeout(this._graceTimer); this._graceTimer = null; }
+            const wasActive = this._activeLink() === rtc || this._rtc === rtc;
+            if (wasActive) {
                 this._parkStandby();
                 this._downgradeToWs(why);
+                // If the user explicitly chose WebRTC, keep trying to restore it
+                // instead of silently staying on WS.
+                if (this._routeMode === 'rtc' && !this._manualDisconnect && this._isConnected) {
+                    setTimeout(() => {
+                        if (this._isConnected && this._routeMode === 'rtc' && this._mediaPath !== 'rtc') {
+                            console.log('[RDPClient] Manual WebRTC route lost, re-dialing…');
+                            this._rtcFailCount = 0;
+                            this._rtcGiveUp = false;
+                            this._probeRtc(false);
+                        }
+                    }, 1500);
+                }
             } else {
                 this._dropRtc(why);
             }
         };
+        // Transient states (ICE restart / brief blip) can recover. Give the
+        // link a grace period before tearing down, to avoid P2P<->WS flapping.
+        const onTransient = (why) => {
+            if (this._graceTimer) return;
+            console.warn(`[RDPClient] RTC ${why}, waiting ${this._graceMs}ms for recovery…`);
+            this._graceTimer = setTimeout(() => {
+                this._graceTimer = null;
+                const stillDown = !rtc.isOpen?.();
+                if (stillDown) onDead(why);
+                else console.log('[RDPClient] RTC recovered from transient state');
+            }, this._graceMs);
+        };
         rtc.onstate = (st) => {
-            if (st === 'disconnected' || st === 'closed' || st === 'media-closed' || st === 'control-closed') {
+            if (st === 'failed' || st === 'closed') {
                 onDead(`dc-${st}`);
-            } else if (st === 'failed') {
-                onDead('rtc-failed');
+            } else if (st === 'disconnected' || st === 'media-closed' || st === 'control-closed') {
+                onTransient(`dc-${st}`);
             }
         };
         rtc.onerror = () => onDead('rtc-error');
@@ -3385,60 +3555,91 @@ export class RDPClient {
         if (!active) return;
         try {
             const info = await active.getSelectedCandidateInfo();
-            if (info) {
-                const prev = this._rtcLink?.rttMs;
-                this._rtcLink = {
-                    candidateType: info.candidateType,
-                    localType: info.localType,
-                    remoteType: info.remoteType,
-                    rttMs: info.rttMs,
-                    jitterMs: info.jitterMs ?? null,
-                    lossPct: info.lossPct ?? null,
+            const prev = this._rtcLink?.rttMs;
+
+            // Datachannel-only connections often have no usable candidate-pair
+            // currentRoundTripTime. Fall back to a control-channel keepalive
+            // round-trip, which always measures the real media path.
+            let rttMs = info && typeof info.rttMs === 'number' ? info.rttMs : null;
+            if (rttMs == null && typeof active.pingKeepalive === 'function') {
+                const kp = await active.pingKeepalive().catch(() => null);
+                if (kp && typeof kp.rttMs === 'number') rttMs = kp.rttMs;
+            }
+
+            this._rtcLink = {
+                candidateType: info?.candidateType ?? this._rtcLink?.candidateType ?? null,
+                localType: info?.localType ?? this._rtcLink?.localType ?? null,
+                remoteType: info?.remoteType ?? this._rtcLink?.remoteType ?? null,
+                rttMs,
+                jitterMs: info?.jitterMs ?? this._rtcLink?.jitterMs ?? null,
+                lossPct: info?.lossPct ?? this._rtcLink?.lossPct ?? null,
+            };
+            this._updateTransportBadge();
+
+            const l = this._rtcLink;
+            const relay = String(l.candidateType || '').toLowerCase() === 'relay'
+                || String(l.localType || '').toLowerCase() === 'relay'
+                || String(l.remoteType || '').toLowerCase() === 'relay';
+            const tag = relay ? 'TURN' : 'P2P';
+
+            // Keep a separate rolling RTT window for RTC (do NOT mix with the
+            // WS window, or the WS score would be corrupted by RTC samples).
+            if (typeof rttMs === 'number') {
+                const now = performance.now();
+                this._rtcRttTimes.push(now);
+                this._rtcRttValues.push(rttMs);
+                if (this._rtcRttValues.length > 30) { this._rtcRttTimes.shift(); this._rtcRttValues.shift(); }
+                // Derive jitter/loss from the RTC window when the candidate-pair
+                // stats don't expose them, so RTC and WS are scored the same way.
+                if (l.jitterMs == null || l.lossPct == null) {
+                    const derived = this._deriveLinkQuality(this._rtcRttValues, this._rtcRttTimes);
+                    if (l.jitterMs == null) l.jitterMs = derived.jitterMs;
+                    if (l.lossPct == null) l.lossPct = derived.lossPct;
+                }
+                this._routeStats.rtc = {
+                    ...(this._routeStats.rtc || {}),
+                    rttMs, lossPct: l.lossPct, jitterMs: l.jitterMs,
+                    score: this._scoreLink({ rttMs, lossPct: l.lossPct, jitterMs: l.jitterMs }),
+                    updatedAt: Date.now(),
                 };
-                this._updateTransportBadge();
-                const tag = String(info.candidateType || '').toLowerCase() === 'relay'
-                    || String(info.localType || '').toLowerCase() === 'relay'
-                    || String(info.remoteType || '').toLowerCase() === 'relay'
-                    ? 'TURN' : 'P2P';
-                if (typeof info.rttMs === 'number') {
-                    this._lastLatency = info.rttMs;
-                    const extra = info.lossPct !== null && info.lossPct !== undefined
-                        ? ` loss ${info.lossPct.toFixed(1)}%` : '';
-                    this._el.latency.textContent = `Latency: ${info.rttMs}ms (${tag}${extra})`;
-                    this._emit('latency', {
-                        latencyMs: info.rttMs, transport: 'rtc',
-                        lossPct: info.lossPct ?? null, jitterMs: info.jitterMs ?? null,
-                    });
-                }
-                if (typeof prev === 'number' && typeof info.rttMs === 'number') {
-                    this._maybeDowngradeRtc();
-                }
+                this._lastLatency = rttMs;
+                const extra = [];
+                if (l.lossPct != null && l.lossPct > 0.5) extra.push(`loss ${l.lossPct.toFixed(1)}%`);
+                if (l.jitterMs != null && l.jitterMs > 30) extra.push(`jit ${l.jitterMs}ms`);
+                const suffix = extra.length ? ` · ${extra.join(' · ')}` : '';
+                this._el.latency.textContent = `Latency: ${rttMs}ms (${tag}${suffix})`;
+                this._emit('latency', {
+                    latencyMs: rttMs, transport: 'rtc',
+                    lossPct: l.lossPct ?? null, jitterMs: l.jitterMs ?? null,
+                });
+            }
+            if (typeof prev === 'number' && typeof rttMs === 'number') {
+                this._maybeDowngradeRtc();
             }
         } catch {}
     }
 
     _maybeDowngradeRtc() {
         if (this._routeMode !== 'auto' || this._mediaPath !== 'rtc') return;
+        // Don't re-evaluate immediately after a switch: WS stats are still the
+        // pre-switch samples and would cause an instant bounce back.
+        if (Date.now() - (this._lastAutoSwitchAt || 0) < (this._autoWarmupMs || 8000)) return;
         const { ws, rtc } = this._currentScores();
         if (!rtc || rtc.rttMs === null) return;
         if (ws.rttMs === null) return;
-        const rtcBad = this._isBadScore(rtc);
-        const rtcWorse = rtc.score > ws.score * 1.3;
-        if (!rtcBad && !rtcWorse) return;
+        // Only fall back when WS is MEASURABLY BETTER than the current RTC path.
+        // An absolutely-bad RTC link is not a reason to switch if WS is not
+        // actually better (e.g. both paths are poor).
+        const wsBetter = ws.score < rtc.score * 0.85;
+        if (!wsBetter) return;
         if (!this._isStableScore(ws)) {
-            console.log(`[RDPClient] Auto route: rtc bad but ws unstable (ws rtt ${ws.rttMs}ms loss ${(ws.lossPct ?? 0).toFixed(1)}% vs rtc rtt ${rtc.rttMs}ms), staying`);
+            console.log(`[RDPClient] Auto route: rtc degraded but ws not stable yet (rtc score ${Math.round(rtc.score)} vs ws ${Math.round(ws.score)}), staying`);
             return;
         }
-        if (!(rtc.score > ws.score * 1.15) && !(rtcBad && rtc.score > ws.score)) return;
         if (!this._autoCooldownOk()) return;
         this._markAutoSwitch();
-        if (rtcWorse) {
-            console.warn(`[RDPClient] RTC worse than stable WS (rtc rtt ${rtc.rttMs}ms score ${Math.round(rtc.score)} vs ws rtt ${ws.rttMs}ms score ${Math.round(ws.score)}), falling back`);
-            this._downgradeToWs('auto-better-ws');
-            return;
-        }
-        console.warn(`[RDPClient] RTC poor but WS stable (rtt ${rtc.rttMs}ms loss ${rtc.lossPct?.toFixed(1) ?? '-'}% jit ${rtc.jitterMs ?? '-'}ms), falling back`);
-        this._downgradeToWs('poor-link');
+        console.warn(`[RDPClient] Auto route: WS clearly better (ws rtt ${ws.rttMs}ms score ${Math.round(ws.score)} vs rtc rtt ${rtc.rttMs}ms score ${Math.round(rtc.score)}), falling back`);
+        this._downgradeToWs('auto-better-ws');
     }
 
     _confirmMediaPath(path, link = null) {
@@ -3450,7 +3651,28 @@ export class RDPClient {
             if (link) this._rtcLink = link;
         }
         if (changed) {
-            console.log(`[RDPClient] Media path confirmed: ${path}`);
+            console.log(`[RDPClient] Media path confirmed: ${path}`, {
+                routeMode: this._routeMode,
+                rtcOpen: !!this._rtc?.isOpen?.(),
+            });
+            // Only repaint if frames were actually dropped around the switch.
+            // A clean switch continues the same frame stream, so no refresh is
+            // needed and forcing one causes a needless visible repaint.
+            if (this._shouldRefreshOnSwitch()) {
+                this._forceRefresh(`path->${path}`);
+            } else {
+                console.log('[RDPClient] Clean path switch, no refresh needed');
+            }
+        }
+        // Apply any resize that was deferred while the switch was in flight.
+        if (this._pendingResizeCheck) {
+            this._pendingResizeCheck = false;
+            clearTimeout(this._resizeTimeout);
+            this._resizeTimeout = setTimeout(() => {
+                if (this._isConnected && this._mediaPath !== 'rtc-pending' && !this._rtcDialing) {
+                    this._handleResize();
+                }
+            }, 800);
         }
         this._updateTransportBadge();
         if (path === 'rtc') {
@@ -3476,13 +3698,23 @@ export class RDPClient {
         if (this._mediaPath === 'ws') {
             return;
         }
-        console.warn(`[RDPClient] Downgrading media to WS (${reason})`);
+        console.warn(`[RDPClient] Downgrading media to WS (${reason})`, {
+            routeMode: this._routeMode,
+            mediaPath: this._mediaPath,
+            sinceAutoSwitch: Date.now() - (this._lastAutoSwitchAt || 0),
+            rtcOpen: !!this._rtc?.isOpen?.(),
+            standbyOpen: !!this._standbyRtc?.isOpen?.(),
+            stack: new Error().stack.split('\n').slice(2, 5).join(' | '),
+        });
+        const needRefresh = this._shouldRefreshOnSwitch()
+            || /failed|error|closed|disconnected/.test(String(reason));
         try { this._sendMessage({ type: 'rtc-downgrade' }); } catch {}
         if (this._mediaPath === 'rtc' || this._mediaPath === 'rtc-pending') this._parkStandby();
         if (this._rtc) { try { this._rtc.close(); } catch {} }
         this._rtc = null;
         this._mediaPath = 'ws';
         this._rtcLink = { candidateType: null, rttMs: null, jitterMs: null, lossPct: null };
+        if (needRefresh) this._forceRefresh(`downgrade:${reason}`);
         this._updateTransportBadge();
         this._emit('transport', { mediaPath: 'ws', mode: this._transportMode, routeMode: this._routeMode, reason });
         if (this._el?.routePop?.classList.contains('open')) this._renderRoutePop();
@@ -3505,6 +3737,15 @@ export class RDPClient {
                 if (msg.transport === 'rtc') {
                     const link = this._rtc ?? this._standbyRtc ?? this._pendingRtc;
                     if (link?.isOpen?.()) {
+                        if (this._routeMode === 'ws') {
+                            // User explicitly forced RELAY: ignore a late RTC
+                            // upgrade and tell the server to fall back.
+                            console.log('[RDPClient] Ignoring rtc-active: user forced WS route');
+                            this._parkStandby();
+                            try { this._sendMessage({ type: 'rtc-downgrade' }); } catch {}
+                            this._confirmMediaPath('ws');
+                            break;
+                        }
                         if (this._standbyRtc === link) this._standbyRtc = null;
                         if (this._pendingRtc === link) this._pendingRtc = null;
                         this._rtc = link;
@@ -3515,6 +3756,23 @@ export class RDPClient {
                         this._confirmMediaPath('ws');
                     }
                 } else {
+                    // Server said "still ws": likely it hadn't registered the
+                    // media sender yet (offer race). If our DC is open, retry
+                    // the upgrade a few times before giving up, so we don't
+                    // flap P2P -> WS on a transient handshake race.
+                    const link = this._rtc ?? this._standbyRtc ?? this._pendingRtc;
+                    const tries = (this._upgradeRetries || 0);
+                    if (link?.isOpen?.() && tries < 3 && this._routeMode !== 'ws') {
+                        this._upgradeRetries = tries + 1;
+                        console.warn(`[RDPClient] Server kept media on WS, retrying rtc-upgrade (${this._upgradeRetries}/3)…`);
+                        setTimeout(() => {
+                            if (link?.isOpen?.() && this._isConnected) {
+                                this._sendMessage({ type: 'rtc-upgrade', route: 'rtc' });
+                            }
+                        }, 500);
+                        break;
+                    }
+                    this._upgradeRetries = 0;
                     if (this._mediaPath === 'rtc-pending' && this._routeMode === 'rtc') {
                         console.warn('[RDPClient] RTC switch failed: server kept media on WS (stale session/sender?) - closing stale DC, next click will re-dial; check backend logs');
                         this._closeRtc();
@@ -3647,14 +3905,22 @@ export class RDPClient {
 
     _handleConnected(msg) {
         this._isConnected = true;
+        this._connectedAt = Date.now();
+        this._lastFrameGapAt = 0;
+        this._frameGapCount = 0;
+        this._lastRefreshAt = 0;
         this._reconnectAttempts = 0;
         this._clearReconnectTimer();
         this._mediaPath = 'ws';
         this._latSamples = [];
         this._rtcLink = { candidateType: null, rttMs: null, jitterMs: null, lossPct: null };
-        this._wsQuality = { sent: 0, lost: 0, jitterMs: null, lossPct: null, lastRtt: null };
+        this._wsQuality = { sent: 0, lost: 0, jitterMs: null, lossPct: null, lastRtt: null, window: [] };
         this._pingSeq = 0;
         this._pingPending = new Map();
+        this._rttTimes = [];
+        this._rttValues = [];
+        this._rtcRttTimes = [];
+        this._rtcRttValues = [];
         this._updateTransportBadge();
         this._updateStatus('connected', 'Connected');
         this._el.canvas.style.display = 'block';
@@ -3681,12 +3947,18 @@ export class RDPClient {
                                   msg.height || this._canvas.height);
 
         if (this._pingTimer) clearInterval(this._pingTimer);
-        this._pingTimer = setInterval(() => this._sendPing(), 5000);
+        this._pingTimer = setInterval(() => this._sendPing(), this._pingIntervalMs);
+        this._sendPing();
         this._rtcFailCount = 0;
         this._rtcGiveUp = false;
         this._startRouteLoop();
+        this._rtcDialing = null;
+        if (this._initialProbeTimer) clearTimeout(this._initialProbeTimer);
         if (this._routeMode === 'rtc' || this._routeMode === 'auto') {
-            setTimeout(() => this._probeRtc(false), 1500);
+            this._initialProbeTimer = setTimeout(() => {
+                this._initialProbeTimer = null;
+                this._probeRtc(false);
+            }, 1500);
         }
         
         this._emit('connected', { width: msg.width, height: msg.height });
@@ -3698,14 +3970,23 @@ export class RDPClient {
     }
 
     _handleDisconnect() {
+        if (this._pendingConnect) {
+            try { this._pendingConnect.reject(new Error('Connection closed before establishing session')); } catch {}
+            this._pendingConnect = null;
+        }
         this._isConnected = false;
         this._transport = null;
         this._closeRtc();
         this._mediaPath = 'ws';
         this._latSamples = [];
         this._rtcLink = { candidateType: null, rttMs: null, jitterMs: null, lossPct: null };
-        this._wsQuality = { sent: 0, lost: 0, jitterMs: null, lossPct: null, lastRtt: null };
+        this._wsQuality = { sent: 0, lost: 0, jitterMs: null, lossPct: null, lastRtt: null, window: [] };
         this._pingPending = new Map();
+        this._rttTimes = [];
+        this._rttValues = [];
+        this._rtcRttTimes = [];
+        this._rtcRttValues = [];
+        if (this._badgeTimer) { clearTimeout(this._badgeTimer); this._badgeTimer = null; }
         this._updateTransportBadge();
         this._stopRouteLoop();
         if (this._el?.routePop) this._el.routePop.classList.remove('open');
@@ -3832,48 +4113,153 @@ export class RDPClient {
         if (this._pingPending.size > 20) {
             const oldest = Math.min(...this._pingPending.keys());
             this._pingPending.delete(oldest);
-            this._wsQuality.lost += 1;
-            this._updateWsLoss();
         }
         this._wsQuality.sent += 1;
         this._sendMessage({ type: 'ping', seq });
         setTimeout(() => {
             if (this._pingPending.delete(seq)) {
                 this._wsQuality.lost += 1;
-                this._updateWsLoss();
+                this._recordPingOutcome(true);
+                if (seq === this._pingSeq) this._markLatencyStale();
                 this._maybeAutoSwitch();
             }
-        }, 3000);
+        }, this._pingTimeoutMs);
+    }
+
+    _markLatencyStale() {
+        const last = this._wsQuality.lastRtt;
+        if (last == null) return;
+        const extra = [];
+        if (this._wsQuality.lossPct != null && this._wsQuality.lossPct > 0.5) {
+            extra.push(`loss ${this._wsQuality.lossPct.toFixed(1)}%`);
+        }
+        const suffix = extra.length ? ` (${extra.join(' · ')})` : '';
+        this._el.latency.textContent = `Latency: ${last}ms?${suffix}`;
     }
 
     _updateWsLoss() {
-        const { sent, lost } = this._wsQuality;
-        this._wsQuality.lossPct = sent > 0 ? (lost / sent) * 100 : null;
+        const win = this._wsQuality.window || (this._wsQuality.window = []);
+        if (!win.length) {
+            this._wsQuality.lossPct = null;
+            return;
+        }
+        const lost = win.reduce((a, b) => a + b, 0);
+        this._wsQuality.lossPct = (lost / win.length) * 100;
+    }
+
+    _recordPingOutcome(lost) {
+        const win = this._wsQuality.window || (this._wsQuality.window = []);
+        win.push(lost ? 1 : 0);
+        if (win.length > 30) win.shift();
+        this._updateWsLoss();
     }
 
     _handlePong(msg) {
         const now = performance.now();
-        let latency = Math.round(now - this._pingStart);
+        let latency;
         if (msg && typeof msg.seq === 'number' && this._pingPending.has(msg.seq)) {
             latency = Math.round(now - this._pingPending.get(msg.seq));
             this._pingPending.delete(msg.seq);
-            this._updateWsLoss();
-        }
-        const prev = this._wsQuality.lastRtt;
-        if (typeof prev === 'number') {
-            const jit = Math.abs(latency - prev);
-            this._wsQuality.jitterMs = this._wsQuality.jitterMs === null
-                ? jit : Math.round(this._wsQuality.jitterMs * 0.7 + jit * 0.3);
+            this._recordPingOutcome(false);
+        } else {
+            return;
         }
         this._wsQuality.lastRtt = latency;
+        this._wsQuality.lastRttAt = now;
+        this._rttTimes.push(now);
+        this._rttValues.push(latency);
+        if (this._rttValues.length > 30) {
+            this._rttTimes.shift();
+            this._rttValues.shift();
+        }
+        this._wsQuality.jitterMs = this._computeRttJitter();
         if (this._mediaPath === 'rtc' || this._mediaPath === 'rtc-pending') {
             this._latSamples.push(latency);
             if (this._latSamples.length > 12) this._latSamples.shift();
             this._maybeDowngradeRtc();
+            // Do NOT overwrite the latency panel here: RTC latency is written
+            // by _refreshRtcLink. Writing the WS value too would make the
+            // bottom-right latency flicker between WS and RTC every ping.
             if (this._el?.routePop?.classList.contains('open')) this._renderRoutePop();
             return;
         }
         this._recordLatency(latency);
+    }
+
+    _computeRttJitter() {
+        const n = this._rttValues.length;
+        if (n < 2) return null;
+        let sum = 0;
+        for (let i = 0; i < n; i++) sum += this._rttValues[i];
+        const mean = sum / n;
+        let dev = 0;
+        for (let i = 0; i < n; i++) dev += Math.abs(this._rttValues[i] - mean);
+        return Math.round(dev / n);
+    }
+
+    _recordRtcRouteStat(rttMs, lossPct, jitterMs) {
+        const prev = this._routeStats.rtc || {};
+        // Feed the RTC RTT window so we can derive jitter/loss consistently,
+        // identical to how the WS score is computed.
+        if (typeof rttMs === 'number') {
+            const now = performance.now();
+            this._rtcRttTimes.push(now);
+            this._rtcRttValues.push(rttMs);
+            if (this._rtcRttValues.length > 30) { this._rtcRttTimes.shift(); this._rtcRttValues.shift(); }
+        }
+        const derived = this._deriveLinkQuality(this._rtcRttValues, this._rtcRttTimes);
+        const loss = typeof lossPct === 'number' ? lossPct : (prev.lossPct ?? derived.lossPct);
+        const jit = typeof jitterMs === 'number' ? jitterMs : (prev.jitterMs ?? derived.jitterMs);
+        this._routeStats.rtc = {
+            ...prev,
+            rttMs,
+            lossPct: loss,
+            jitterMs: jit,
+            score: this._scoreLink({ rttMs, lossPct: loss, jitterMs: jit }),
+            updatedAt: Date.now(),
+        };
+    }
+
+    /**
+     * Derive jitter/loss for a link whose native stats don't expose them.
+     * jitter = mean absolute deviation of RTT; loss estimated from suspect
+     * samples (a keepalive timeout shows up as a very large RTT). Capped so a
+     * single spike doesn't dominate the score.
+     */
+    _deriveLinkQuality(values, times, maxAgeMs = 15000) {
+        const now = performance.now();
+        const fresh = [];
+        for (let i = values.length - 1; i >= 0; i--) {
+            if (now - times[i] > maxAgeMs) break;
+            fresh.push(values[i]);
+        }
+        if (!fresh.length) return { jitterMs: null, lossPct: null };
+        let sum = 0;
+        for (const v of fresh) sum += v;
+        const mean = sum / fresh.length;
+        let dev = 0;
+        let suspect = 0;
+        const spike = Math.max(300, mean * 3);
+        for (const v of fresh) {
+            dev += Math.abs(v - mean);
+            if (v > spike) suspect += 1;
+        }
+        return {
+            jitterMs: fresh.length >= 2 ? Math.round(dev / fresh.length) : null,
+            lossPct: (suspect / fresh.length) * 100,
+        };
+    }
+
+    _updateWsPanel() {
+        if (this._wsQuality.lastRtt == null) return;
+        const rt = this._wsQuality.lastRtt;
+        this._lastLatency = rt;
+        const q = this._wsQuality;
+        const extra = [];
+        if (q.lossPct != null && q.lossPct > 0.5) extra.push(`loss ${q.lossPct.toFixed(1)}%`);
+        if (q.jitterMs != null && q.jitterMs > 30) extra.push(`jit ${q.jitterMs}ms`);
+        const suffix = extra.length ? ` (${extra.join(' · ')})` : '';
+        this._el.latency.textContent = `Latency: ${rt}ms${suffix}`;
     }
 
     // --------------------------------------------------
@@ -5044,8 +5430,15 @@ export class RDPClient {
 
     _getAvailableDimensions() {
         const rect = this._el.screen.getBoundingClientRect();
-        let width = Math.floor(rect.width - 4);
-        let height = Math.floor(rect.height - 4);
+        // Target the physical pixels the canvas is painted on: any mismatch makes
+        // the browser resample the frame (bilinear filtering = blurry text).
+        // In fullscreen the screen border is removed, so nothing has to be
+        // subtracted there.
+        const fullscreen = this._el.container.classList.contains('fs-autohide');
+        const inset = fullscreen ? 0 : 4;
+        const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, this.options.maxPixelRatio || 1));
+        let width = Math.floor((rect.width - inset) * dpr);
+        let height = Math.floor((rect.height - inset) * dpr);
 
         // do never send resize below RDP server minimums or above maximums
         const minRdpServerDimensions = { width: 640, height: 480 };
@@ -5078,7 +5471,23 @@ export class RDPClient {
 
         this._resizeTimeout = setTimeout(() => {
             if (!this._isConnected) return;
-            
+
+            // Don't resize during the post-connect stabilization window or while
+            // an RTC media switch is in flight: a resize racing the sender switch
+            // makes the remote host reset the RDP transport (first-connect drop).
+            const sinceConnect = Date.now() - (this._connectedAt || 0);
+            if (sinceConnect < 4000
+                || this._mediaPath === 'rtc-pending'
+                || this._rtcDialing) {
+                this._pendingResizeCheck = true;
+                clearTimeout(this._pendingResizeTimer);
+                this._pendingResizeTimer = setTimeout(() => {
+                    this._pendingResizeTimer = null;
+                    this._handleResize();
+                }, 1000);
+                return;
+            }
+
             const { width, height } = this._getAvailableDimensions();
             
             if ((width !== this._canvas.width || height !== this._canvas.height) &&
@@ -5087,7 +5496,7 @@ export class RDPClient {
                 this._lastRequestedHeight = height;
                 this._sendMessage({ type: 'resize', width, height });
             }
-        }, this.options.resizeDebounceMs);
+        }, delay);
     }
 
     _handleServerResize(width, height) {
