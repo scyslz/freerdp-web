@@ -1694,10 +1694,13 @@ export class RDPClient {
                     break;
 
                 case 'frameGap':
-                    // Decoder saw a gap -> real frame loss, a refresh is warranted.
+                    // A frame was started but never completed -> real loss. A single
+                    // isolated drop doesn't need a full keyframe refresh (the next
+                    // delta usually repairs it); only a burst does. Record the time
+                    // so the path-switch heuristic still sees recent loss.
                     this._lastFrameGapAt = Date.now();
                     this._frameGapCount = (this._frameGapCount || 0) + 1;
-                    console.warn(`[RDPClient] Frame gap detected (${msg.expected} -> ${msg.got}), refresh warranted`);
+                    console.warn(`[RDPClient] Frame gap detected (${msg.expected} -> ${msg.got})`);
                     break;
                 
             case 'unhandled':
@@ -1818,6 +1821,18 @@ export class RDPClient {
         return true;
     }
 
+    /**
+     * Tell the worker to forget its frame-ID continuity baseline. Called on a
+     * media-path switch: the new path can restart/skip frame IDs, which the
+     * worker would otherwise report as a false "frame gap" (丢帧).
+     */
+    _resetWorkerFrameTracking() {
+        if (!this._gfxWorker || !this._gfxWorkerReady) return;
+        this._gfxWorker.postMessage({ type: 'resetFrameTracking' });
+        // Baseline is gone, so any recent gap memory is stale too.
+        this._lastFrameGapAt = 0;
+    }
+
     _forceRefresh(reason) {
         if (!this._gfxWorker || !this._gfxWorkerReady) return;
         this._pendingGfxMessages = [];
@@ -1916,6 +1931,11 @@ export class RDPClient {
             this._resizeObserver.observe(this._el.screen);
         }
 
+        // Browser zoom / DPR changes: a fluid layout keeps the screen element's
+        // CSS size constant (so ResizeObserver never fires) while devicePixelRatio
+        // changes. Watch the resolution media query so zoom re-triggers a resize.
+        this._setupZoomListener();
+
         // Route switcher popup
         this._el.transport.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1928,6 +1948,46 @@ export class RDPClient {
                 this._el.routePop.classList.remove('open');
             }
         });
+    }
+
+    /**
+     * Re-arm a matchMedia listener whenever devicePixelRatio changes (browser
+     * zoom, moving the window between displays). A fluid layout keeps the screen
+     * element's CSS size constant under zoom, so ResizeObserver alone misses it.
+     */
+    _setupZoomListener() {
+        if (typeof window.matchMedia !== 'function') return;
+        // Reset devicePixelRatio-based canvas backing so zoomed output stays 1:1.
+        this._lastDpr = window.devicePixelRatio || 1;
+        const arm = () => {
+            const prev = this._zoomMediaQuery;
+            if (prev) {
+                if (typeof prev.removeEventListener === 'function') {
+                    prev.removeEventListener('change', this._zoomChangeHandler);
+                } else if (typeof prev.removeListener === 'function' && this._zoomChangeHandler) {
+                    prev.removeListener(this._zoomChangeHandler);
+                }
+            }
+            const dpr = window.devicePixelRatio || 1;
+            const mq = window.matchMedia(`(resolution: ${dpr}dppx)`);
+            const onChange = () => {
+                if (this._destroyed) return;
+                this._lastDpr = window.devicePixelRatio || 1;
+                // Force the size-dedup guard to re-evaluate under the new DPR.
+                this._lastRequestedWidth = 0;
+                this._lastRequestedHeight = 0;
+                this._handleResize();
+                arm();
+            };
+            this._zoomChangeHandler = onChange;
+            this._zoomMediaQuery = mq;
+            if (typeof mq.addEventListener === 'function') {
+                mq.addEventListener('change', onChange);
+            } else if (typeof mq.addListener === 'function') {
+                mq.addListener(onChange);
+            }
+        };
+        arm();
     }
 
     // --------------------------------------------------
@@ -2467,6 +2527,7 @@ export class RDPClient {
      */
     async destroy() {
         this._manualDisconnect = true;
+        this._destroyed = true;
         this._clearReconnectTimer();
         await this.disconnect();
         if (this._gfxWorker) {
@@ -2478,6 +2539,13 @@ export class RDPClient {
         }
         if (this._toolbarResizeObserver) {
             this._toolbarResizeObserver.disconnect();
+        }
+        if (this._zoomMediaQuery && this._zoomChangeHandler) {
+            if (typeof this._zoomMediaQuery.removeEventListener === 'function') {
+                this._zoomMediaQuery.removeEventListener('change', this._zoomChangeHandler);
+            } else if (typeof this._zoomMediaQuery.removeListener === 'function') {
+                this._zoomMediaQuery.removeListener(this._zoomChangeHandler);
+            }
         }
         clearTimeout(this._toastTimer);
         this._shadow.innerHTML = '';
@@ -3655,10 +3723,12 @@ export class RDPClient {
                 routeMode: this._routeMode,
                 rtcOpen: !!this._rtc?.isOpen?.(),
             });
-            // Only repaint if frames were actually dropped around the switch.
-            // A clean switch continues the same frame stream, so no refresh is
-            // needed and forcing one causes a needless visible repaint.
-            if (this._shouldRefreshOnSwitch()) {
+            // Decide whether to repaint based on loss seen BEFORE the switch, then
+            // clear the worker's frame-ID baseline so the new path's frame
+            // numbering is not misreported as a gap (丢帧).
+            const needRefresh = this._shouldRefreshOnSwitch();
+            this._resetWorkerFrameTracking();
+            if (needRefresh) {
                 this._forceRefresh(`path->${path}`);
             } else {
                 console.log('[RDPClient] Clean path switch, no refresh needed');
@@ -3714,6 +3784,9 @@ export class RDPClient {
         this._rtc = null;
         this._mediaPath = 'ws';
         this._rtcLink = { candidateType: null, rttMs: null, jitterMs: null, lossPct: null };
+        // WS and RTC number frames independently; clear the worker baseline so
+        // the resumed WS stream is not flagged as a frame gap.
+        this._resetWorkerFrameTracking();
         if (needRefresh) this._forceRefresh(`downgrade:${reason}`);
         this._updateTransportBadge();
         this._emit('transport', { mediaPath: 'ws', mode: this._transportMode, routeMode: this._routeMode, reason });

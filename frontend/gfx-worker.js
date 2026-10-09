@@ -1227,6 +1227,13 @@ function compositeSurfaceToPrimary(surfaceId) {
  * Start a new frame
  */
 function startFrame(frameId) {
+    // A frame was started but the previous one never got an EndFrame: that is a
+    // REAL dropped frame (the server's IDs are NOT contiguous by design, so we
+    // must not infer loss from ID jumps). Report it and move on.
+    if (currentFrameId !== null && currentFrameId !== frameId) {
+        console.warn(`[GFX Worker] Frame ${currentFrameId} started but never completed (superseded by ${frameId})`);
+        self.postMessage({ type: 'frameGap', expected: currentFrameId, got: frameId, missing: 1 });
+    }
     currentFrameId = frameId;
     frameUpdatedSurfaces.clear();
 }
@@ -1236,15 +1243,9 @@ function startFrame(frameId) {
  */
 async function endFrame(frameId) {
     if (currentFrameId !== frameId) {
-        console.warn(`[GFX Worker] Frame mismatch: expected ${currentFrameId}, got ${frameId}`);
-    }
-    // Detect a real wire-level gap: completed frame IDs should be contiguous.
-    // Start/end mismatch alone is noisy (frames without StartFrame, interleaving)
-    // and must not be treated as loss.
-    if (lastCompletedFrameId !== null && frameId > lastCompletedFrameId + 1) {
-        const missing = frameId - lastCompletedFrameId - 1;
-        console.warn(`[GFX Worker] Frame gap: ${missing} frame(s) missed (${lastCompletedFrameId} -> ${frameId})`);
-        self.postMessage({ type: 'frameGap', expected: lastCompletedFrameId + 1, got: frameId, missing });
+        // No matching StartFrame (e.g. delta frame without a StartFrame pair).
+        // This is normal interleaving, not loss.
+        currentFrameId = frameId;
     }
 
     // Composite all mapped surfaces that were updated in this frame to primary canvas
@@ -1510,7 +1511,20 @@ async function processMessage(event) {
                 deleteSurface(surfaceId);
             }
             mappedSurfaces.clear();
+            // The server restarts its frame-ID domain after a reset; forget the
+            // last seen ID so the new stream isn't misread as a huge gap.
+            lastCompletedFrameId = null;
+            currentFrameId = null;
             console.log('[GFX Worker] Session reset complete');
+            break;
+
+        case 'resetFrameTracking':
+            // Media-path switch (e.g. RTC<->WS): the frame-ID stream may restart
+            // or skip, so drop the continuity baseline without a false gap.
+            lastCompletedFrameId = null;
+            currentFrameId = null;
+            frameUpdatedSurfaces.clear();
+            console.log('[GFX Worker] Frame tracking reset (path switch)');
             break;
             
         case 'refresh':
@@ -1520,6 +1534,11 @@ async function processMessage(event) {
             h264NeedsKeyframe = true;
             h264DecoderError = false;
             h264DecodeQueue = [];
+            // After a recovery refresh the decoder waits for a fresh keyframe; the
+            // incoming frame IDs are not guaranteed to continue the old sequence,
+            // so reset the baseline to avoid a spurious post-refresh gap report.
+            lastCompletedFrameId = null;
+            currentFrameId = null;
             if (primaryCanvas && primaryCtx) {
                 primaryCtx.fillStyle = '#000000';
                 primaryCtx.fillRect(0, 0, primaryCanvas.width, primaryCanvas.height);
