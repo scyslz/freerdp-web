@@ -948,6 +948,50 @@ fail:
     return NULL;
 }
 
+/* Translate a FreeRDP error code into a human-readable message.
+ * Prefers friendly hints for common connection errors (bad credentials,
+ * DNS/transport failures, etc.), then Falls back to FreeRDP's own string. */
+static void bridge_format_error(UINT32 error, char* buf, size_t buflen)
+{
+    if (!buf || buflen == 0) return;
+
+    const char* hint = NULL;
+    switch (error) {
+        case 0x00020004: hint = "DNS lookup failed - host could not be resolved"; break;
+        case 0x00020005: hint = "Host name not found"; break;
+        case 0x00020006: hint = "Could not reach RDP host (connection refused or timed out)"; break;
+        case 0x00020007: hint = "MCS connect failed"; break;
+        case 0x00020008: hint = "TLS/SSL handshake failed"; break;
+        case 0x00020009: hint = "Authentication failed"; break;
+        case 0x0002000C: hint = "Security negotiation failed"; break;
+        case 0x0002000D: hint = "Transport connection failed"; break;
+        case 0x0002000E: hint = "Password has expired"; break;
+        case 0x00020012: hint = "Account is disabled"; break;
+        case 0x00020013: hint = "Password must be changed before logon"; break;
+        case 0x00020014: hint = "Logon failed - wrong username or password"; break;
+        case 0x00020015: hint = "Wrong password"; break;
+        case 0x00020016: hint = "Access denied"; break;
+        case 0x00020018: hint = "Account is locked out"; break;
+        case 0x00020019: hint = "Account has expired"; break;
+        case 0x0002001A: hint = "Logon type not granted"; break;
+        case 0x0002001B: hint = "Missing username or password"; break;
+        case 0x0002001C: hint = "Remote host did not respond (activation timeout)"; break;
+        case 0x0002001D: hint = "Remote host is still booting - try again shortly"; break;
+        default: break;
+    }
+
+    if (hint) {
+        snprintf(buf, buflen, "%s (0x%08X)", hint, error);
+        return;
+    }
+
+    const char* desc = freerdp_get_last_error_string(error);
+    if (desc && *desc)
+        snprintf(buf, buflen, "%s (0x%08X)", desc, error);
+    else
+        snprintf(buf, buflen, "Connection failed (0x%08X)", error);
+}
+
 int rdp_connect(RdpSession* session)
 {
     rdpContext* context = (rdpContext*)session;
@@ -979,8 +1023,7 @@ int rdp_connect(RdpSession* session)
     if (!freerdp_connect(instance)) {
         pthread_mutex_unlock(&g_connect_mutex);
         UINT32 error = freerdp_get_last_error(context);
-        snprintf(ctx->error_msg, MAX_ERROR_LEN, 
-                 "Connection failed: 0x%08X", error);
+        bridge_format_error(error, ctx->error_msg, MAX_ERROR_LEN);
         ctx->state = RDP_STATE_ERROR;
         return -1;
     }
@@ -1618,8 +1661,9 @@ int rdp_poll(RdpSession* session, int timeout_ms)
         UINT32 error = freerdp_get_last_error(context);
         fprintf(stderr, "[rdp_bridge] freerdp_check_event_handles failed: error=0x%08X\n", error);
         if (error != FREERDP_ERROR_SUCCESS) {
-            snprintf(ctx->error_msg, MAX_ERROR_LEN, 
-                     "Event handling error: 0x%08X", error);
+            snprintf(ctx->error_msg, MAX_ERROR_LEN, "Session error: %s (0x%08X)",
+                     freerdp_get_last_error_string(error),
+                     error);
             ctx->state = RDP_STATE_ERROR;
             
             /* Mark as disconnecting to prevent GDI handler calls from other threads */

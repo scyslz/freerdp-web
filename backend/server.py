@@ -332,9 +332,10 @@ async def handle_client(websocket: ServerConnection):
                         }))
                         logger.info(f"Client {client_id} RDP session started to {config.host}")
                     else:
+                        detail = getattr(rdp_bridge, 'last_error', None)
                         await websocket.send(json.dumps({
                             'type': 'error',
-                            'message': 'Failed to connect to RDP host'
+                            'message': detail or 'Failed to connect to RDP host'
                         }))
                 
                 elif msg_type == 'disconnect':

@@ -506,6 +506,7 @@ class RDPBridge:
         self._session: Optional[c_void_p] = None
         self._lib: Optional[NativeLibrary] = None
         self.running = False
+        self.last_error: Optional[str] = None
         self._frame_task: Optional[asyncio.Task] = None
         self._audio_task: Optional[asyncio.Task] = None
         self._frame_count = 0
@@ -534,6 +535,7 @@ class RDPBridge:
                     f"Security policy blocked connection to {self.config.host}:{self.config.port} - "
                     f"{validation_result.reason}"
                 )
+                self.last_error = validation_result.reason or 'Connection blocked by security policy'
                 # Send error to client if sender is available
                 if self.sender:
                     try:
@@ -541,7 +543,7 @@ class RDPBridge:
                         await self.sender.send_text(json.dumps({
                             'type': 'error',
                             'error': 'security_policy_violation',
-                            'message': validation_result.reason
+                            'message': self.last_error
                         }))
                     except Exception:
                         pass
@@ -554,6 +556,7 @@ class RDPBridge:
                 logger.info(f"Native RDP bridge version: {version}")
             except RuntimeError as e:
                 logger.error(f"Failed to load native library: {e}")
+                self.last_error = f'Failed to load native RDP library: {e}'
                 return False
             
             # Create session
@@ -570,6 +573,7 @@ class RDPBridge:
             
             if not self._session:
                 logger.error("Failed to create RDP session")
+                self.last_error = 'Failed to create RDP session'
                 return False
             
             # Connect (this may block briefly)
@@ -582,6 +586,7 @@ class RDPBridge:
                 error = self._lib.rdp_get_error(self._session)
                 error_msg = error.decode('utf-8') if error else 'Unknown error'
                 logger.error(f"RDP connection failed: {error_msg}")
+                self.last_error = error_msg
                 self._lib.rdp_destroy(self._session)
                 self._session = None
                 return False
@@ -600,6 +605,7 @@ class RDPBridge:
             
         except Exception as e:
             logger.error(f"Connection error: {e}")
+            self.last_error = str(e) or 'Connection error'
             # Clean up any partially-created session
             if self._session and self._lib:
                 try:
