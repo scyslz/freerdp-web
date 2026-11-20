@@ -902,12 +902,26 @@ class RDPBridge:
             # Unhandled event type
             return None
     
+    # Input events must never be silently dropped: a lost key-release leaves the
+    # remote key held (stuck modifier -> phantom shortcuts like Win+L).
+    _CRITICAL_NATIVE_KINDS = frozenset({'keyboard', 'unicode'})
+
     def _enqueue_native(self, kind: str, *args) -> bool:
         """Queue a native call to run on the rdp_poll thread."""
         if not self._session or not self._lib:
             return False
+        item = (kind, *args)
+        if kind in self._CRITICAL_NATIVE_KINDS:
+            # Block briefly instead of dropping, so key events stay ordered and
+            # every key-up reaches the remote.
+            try:
+                self._cmd_queue.put(item, timeout=0.5)
+                return True
+            except queue.Full:
+                logger.warning(f"Native command queue full, dropping critical {kind}")
+                return False
         try:
-            self._cmd_queue.put_nowait((kind, *args))
+            self._cmd_queue.put_nowait(item)
             return True
         except queue.Full:
             logger.debug(f"Native command queue full, dropping {kind}")
