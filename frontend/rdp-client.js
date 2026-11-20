@@ -566,6 +566,21 @@ const STYLES = `
     cursor: pointer;
 }
 
+.rdp-modal-error {
+    display: none;
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--rdp-error, #e5484d);
+    border-radius: var(--rdp-border-radius);
+    background: color-mix(in srgb, var(--rdp-error, #e5484d) 12%, transparent);
+    color: var(--rdp-error, #e5484d);
+    font-size: var(--rdp-font-size-small);
+    line-height: 1.35;
+    word-break: break-word;
+}
+
+.rdp-modal-error.show { display: block; }
+
 .rdp-modal-buttons {
     display: flex;
     gap: 8px;
@@ -875,6 +890,7 @@ const TEMPLATE = `
     <div class="rdp-modal">
         <div class="rdp-modal-content">
             <h2>Connect to Remote Desktop</h2>
+            <div class="rdp-modal-error"></div>
             <div class="rdp-form-group">
                 <label>Host</label>
                 <input type="text" class="rdp-input-host" placeholder="192.168.1.100">
@@ -1232,6 +1248,8 @@ export class RDPClient {
         this._reconnectAttempts = 0;
         this._manualDisconnect = false;
         this._lastCredentials = null;
+        this._lastError = null;
+        this._connectFailed = false;
         this._composing = false;
         this._toastTimer = null;
     }
@@ -1258,6 +1276,7 @@ export class RDPClient {
             modal: $('.rdp-modal'),
             modalConnect: $('.rdp-modal-connect'),
             modalCancel: $('.rdp-modal-cancel'),
+            modalError: $('.rdp-modal-error'),
             inputHost: $('.rdp-input-host'),
             inputPort: $('.rdp-input-port'),
             inputUser: $('.rdp-input-user'),
@@ -2031,9 +2050,11 @@ export class RDPClient {
 
             this._pendingConnect = { resolve, reject };
             this._manualDisconnect = false;
+            this._connectFailed = false;
             if (!opts || !opts._retry) {
                 this._reconnectAttempts = 0;
                 this._clearReconnectTimer();
+                this._lastError = null;
             }
             this._lastCredentials = { ...credentials };
             this._updateStatus('connecting', 'Connecting...');
@@ -2064,17 +2085,22 @@ export class RDPClient {
 
             transport.onmessage = (e) => this._handleMessage(e);
             transport.onerror = (e) => {
-                this._updateStatus('error', 'Connection error');
+                const reason = 'Connection error (transport failed)';
+                this._lastError = reason;
                 if (this._pendingConnect) {
-                    this._pendingConnect.reject(new Error('Transport error'));
+                    this._pendingConnect.reject(new Error(reason));
                     this._pendingConnect = null;
+                    this._connectFailed = true;
                 }
             };
             transport.onclose = () => this._handleDisconnect();
             transport.connect().catch((e) => {
                 if (this._pendingConnect) {
-                    this._pendingConnect.reject(e instanceof Error ? e : new Error('Transport error'));
+                    const reason = (e instanceof Error && e.message) ? e.message : 'Transport error';
+                    this._lastError = reason;
+                    this._pendingConnect.reject(new Error(reason));
                     this._pendingConnect = null;
+                    this._connectFailed = true;
                 }
             });
         });
@@ -2565,6 +2591,16 @@ export class RDPClient {
         this._el.modal.classList.add('active');
         // Hide cancel button when keepConnectionModalOpen is enabled
         this._el.modalCancel.style.display = this.options.keepConnectionModalOpen ? 'none' : '';
+        // Show the last failure reason if there is one
+        if (this._el.modalError) {
+            if (this._lastError) {
+                this._el.modalError.textContent = this._lastError;
+                this._el.modalError.classList.add('show');
+            } else {
+                this._el.modalError.textContent = '';
+                this._el.modalError.classList.remove('show');
+            }
+        }
         // Prefill remembered connection
         this._restoreRememberedConnection();
         this._el.inputHost.focus();
@@ -4043,10 +4079,15 @@ export class RDPClient {
     }
 
     _handleDisconnect() {
+        const failedConnect = !!this._pendingConnect || this._connectFailed;
         if (this._pendingConnect) {
-            try { this._pendingConnect.reject(new Error('Connection closed before establishing session')); } catch {}
+            const reason = this._lastError || 'Connection closed before establishing session';
+            try { this._pendingConnect.reject(new Error(reason)); } catch {}
             this._pendingConnect = null;
+            this._lastError = reason;
+            this._connectFailed = true;
         }
+        const hadError = this._connectFailed;
         this._isConnected = false;
         this._transport = null;
         this._closeRtc();
@@ -4069,11 +4110,18 @@ export class RDPClient {
         }
         this._lastRequestedWidth = 0;
         this._lastRequestedHeight = 0;
-        this._updateStatus('disconnected', 'Disconnected');
-        this._el.canvas.style.display = 'none';
-        this._el.loading.style.display = 'block';
-        this._el.loading.querySelector('p').textContent = 'Click Connect to start';
-        this._setLoadingMode('idle');
+        if (hadError) {
+            this._updateStatus('error', 'Error');
+            this._el.canvas.style.display = 'none';
+            this._el.loading.style.display = 'none';
+            this._setLoadingMode('idle');
+        } else {
+            this._updateStatus('disconnected', 'Disconnected');
+            this._el.canvas.style.display = 'none';
+            this._el.loading.style.display = 'block';
+            this._el.loading.querySelector('p').textContent = 'Click Connect to start';
+            this._setLoadingMode('idle');
+        }
         this._el.btnConnect.disabled = false;
         this._el.btnDisconnect.disabled = true;
         this._el.btnKeyboard.disabled = true;
@@ -4091,11 +4139,12 @@ export class RDPClient {
 
         if (!this._manualDisconnect && this._autoReconnect) {
             this._scheduleReconnect();
-            if (this._reconnectTimer) return;
+            if (this._reconnectTimer) { this._connectFailed = false; return; }
         }
-        if (this.options.keepConnectionModalOpen) {
+        if (this.options.keepConnectionModalOpen || failedConnect) {
             this._showModal();
         }
+        this._connectFailed = false;
         
         // Clear disconnect timeout
         if (this._disconnectTimeout) {
@@ -4152,15 +4201,18 @@ export class RDPClient {
     }
 
     _handleError(message) {
-        console.error('[RDPClient] Error:', message);
+        const reason = (message && String(message).trim()) || 'Connection error';
+        console.error('[RDPClient] Error:', reason);
+        this._lastError = reason;
         this._updateStatus('error', 'Error');
-        this._emit('error', { message });
+        this._emit('error', { message: reason });
 
         // If we have a pending connect promise (connection attempt failed),
         // reject it and close the transport to allow retry
         if (this._pendingConnect) {
-            this._pendingConnect.reject(new Error(message));
+            this._pendingConnect.reject(new Error(reason));
             this._pendingConnect = null;
+            this._connectFailed = true;
 
             // Close the transport to allow reconnection attempts
             if (this._transport) {
