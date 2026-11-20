@@ -609,6 +609,7 @@ document.body.style.background = themes.midnight.colors.background;
 | `sendKeys(keys, opts)` | Send keystrokes. Options: `{ ctrl, alt, shift, meta, delay }`. Returns a Promise. |
 | `sendKeyCombo(combo)` | Send key combination (e.g., `'Ctrl+Alt+Delete'`) |
 | `sendCtrlAltDel()` | Shortcut for `sendKeyCombo('Ctrl+Alt+Delete')` |
+| `releaseAllKeys()` | Send key-up for every key still held remotely (clears stuck Win/Ctrl/Alt after focus loss) |
 | `sendBackspace(count)` | Send Backspace key press(es). Default count: 1. Returns a Promise. |
 | `sendMouseMove(x, y)` | Move mouse cursor to coordinates (shows visual cursor overlay) |
 | `sendMouseClick(opts)` | Perform mouse click. Options: `{ x, y, button, count, delay }`. Returns a Promise. |

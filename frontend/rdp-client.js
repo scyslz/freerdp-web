@@ -1252,6 +1252,11 @@ export class RDPClient {
         this._connectFailed = false;
         this._composing = false;
         this._toastTimer = null;
+
+        // Physical keys currently held down on the remote, keyed by KeyboardEvent.code.
+        // Used to guarantee a matching key-up is always delivered (see _releaseAllKeys).
+        this._pressedKeys = new Map();
+        this._releaseAllKeysHandler = () => this._releaseAllKeys();
     }
 
     _bindElements() {
@@ -1940,6 +1945,18 @@ export class RDPClient {
         // Keyboard - scoped to shadow root
         this._shadow.addEventListener('keydown', (e) => this._handleKeyDown(e));
         this._shadow.addEventListener('keyup', (e) => this._handleKeyUp(e));
+
+        // If the window loses focus while a key is held down, the matching keyup
+        // never arrives. Without releasing it remotely, a stuck modifier (Win,
+        // Ctrl, Alt, Shift) turns later keystrokes into shortcuts - e.g. a bare
+        // "l" becomes Win+L and locks the remote session.
+        this._releaseAllKeysHandler = () => this._releaseAllKeys();
+        this._visibilityReleaseHandler = () => {
+            if (document.hidden) this._releaseAllKeys();
+        };
+        window.addEventListener('blur', this._releaseAllKeysHandler);
+        document.addEventListener('visibilitychange', this._visibilityReleaseHandler);
+        window.addEventListener('pagehide', this._releaseAllKeysHandler);
         
         // Virtual keyboard events
         this._setupVirtualKeyboard();
@@ -2218,6 +2235,16 @@ export class RDPClient {
      */
     sendCtrlAltDel() {
         this.sendKeyCombo('Ctrl+Alt+Delete');
+    }
+
+    /**
+     * Send key-up for every key still held on the remote.
+     *
+     * Useful after the browser loses keyboard focus (the matching key-up events
+     * are then never delivered) to clear stuck modifiers such as Win/Ctrl/Alt.
+     */
+    releaseAllKeys() {
+        this._releaseAllKeys();
     }
 
     /**
@@ -2574,6 +2601,10 @@ export class RDPClient {
             }
         }
         clearTimeout(this._toastTimer);
+        window.removeEventListener('blur', this._releaseAllKeysHandler);
+        document.removeEventListener('visibilitychange', this._visibilityReleaseHandler);
+        window.removeEventListener('pagehide', this._releaseAllKeysHandler);
+        this._pressedKeys.clear();
         this._shadow.innerHTML = '';
     }
 
@@ -4030,6 +4061,8 @@ export class RDPClient {
         this._rttValues = [];
         this._rtcRttTimes = [];
         this._rtcRttValues = [];
+        // Fresh session: no key can still be logically held on the remote.
+        this._pressedKeys.clear();
         this._updateTransportBadge();
         this._updateStatus('connected', 'Connected');
         this._el.canvas.style.display = 'block';
@@ -4131,6 +4164,11 @@ export class RDPClient {
         
         // Hide virtual keyboard on disconnect
         this.hideKeyboard();
+
+        // Drop any locally tracked key-down state: the session is gone, so the
+        // remote will not receive further key-ups from this client.
+        this._pressedKeys.clear();
+        this._resetKeyboardModifiers();
         
         this._cleanupAudio();
         this._cleanupGfxWorker();
@@ -4856,6 +4894,11 @@ export class RDPClient {
         if (e.isComposing || e.keyCode === 229 || e.key === 'Process') return;
 
         e.preventDefault();
+        this._trackKeyDown(e);
+        // Self-heal: if the browser says no modifier is held but we still think
+        // one is down remotely, release it first. A single missed key-up must
+        // not turn every later character into a shortcut (e.g. Win+L lock).
+        this._reconcileTrackedModifiers(e);
         this._sendMessage({
             type: 'key', action: 'down',
             key: e.key, code: e.code, keyCode: e.keyCode,
@@ -4864,19 +4907,124 @@ export class RDPClient {
         });
     }
 
+    /**
+     * Release tracked modifier keys that the current event proves are no longer
+     * physically held. Prevents a lost key-up from leaving Win/Ctrl/Alt/Shift
+     * stuck on the remote.
+     */
+    _reconcileTrackedModifiers(e) {
+        const checks = [
+            [['ControlLeft', 'ControlRight'], e.ctrlKey],
+            [['ShiftLeft', 'ShiftRight'], e.shiftKey],
+            [['AltLeft', 'AltRight'], e.altKey],
+            [['MetaLeft', 'MetaRight'], e.metaKey],
+        ];
+        for (const [codes, held] of checks) {
+            if (held) continue;
+            for (const code of codes) {
+                // Never reconcile the modifier key currently being pressed.
+                if (code === e.code) continue;
+                const tracked = this._pressedKeys.get(code);
+                if (!tracked) continue;
+                this._pressedKeys.delete(code);
+                try {
+                    this._sendMessage({
+                        type: 'key', action: 'up',
+                        key: tracked.key || '',
+                        code, keyCode: tracked.keyCode || 0,
+                        ctrlKey: false, shiftKey: false, altKey: false, metaKey: false
+                    });
+                } catch {}
+            }
+        }
+    }
+
     _handleKeyUp(e) {
         if (!this._isConnected) return;
-        if (!this._isInputFocused()) return;
+        // Do NOT gate key-up on focus or composition state. If the key-down was
+        // forwarded, the matching key-up must always be sent too, otherwise the
+        // remote keeps the key logically held (stuck modifier -> phantom
+        // shortcuts such as Win+L).
+        if (e.isComposing || e.keyCode === 229 || e.key === 'Process') {
+            this._releaseKey(e.code, e.key);
+            return;
+        }
 
-        if (e.isComposing || e.keyCode === 229 || e.key === 'Process') return;
+        // Outside the capture surface only release keys we actually forwarded;
+        // ignore stray key-ups from other parts of the page.
+        if (!this._isInputFocused() && !this._pressedKeys.has(e.code)) return;
 
         e.preventDefault();
+        this._trackKeyUp(e.code);
         this._sendMessage({
             type: 'key', action: 'up',
             key: e.key, code: e.code, keyCode: e.keyCode,
             ctrlKey: e.ctrlKey, shiftKey: e.shiftKey,
             altKey: e.altKey, metaKey: e.metaKey
         });
+    }
+
+    /** Remember a forwarded key-down so a matching key-up is never forgotten. */
+    _trackKeyDown(e) {
+        if (!e.code) return;
+        this._pressedKeys.set(e.code, { key: e.key, keyCode: e.keyCode });
+    }
+
+    _trackKeyUp(code) {
+        if (!code) return;
+        this._pressedKeys.delete(code);
+    }
+
+    /**
+     * Release a single tracked key without a browser event (used when an IME
+     * intercepts key-up). Uses the same payload shape as _handleKeyUp.
+     */
+    _releaseKey(code, key) {
+        if (!this._isConnected) return;
+        const tracked = this._pressedKeys.get(code);
+        if (!tracked) return;
+        this._pressedKeys.delete(code);
+        this._sendMessage({
+            type: 'key', action: 'up',
+            key: tracked.key || key || '',
+            code, keyCode: tracked.keyCode || 0,
+            ctrlKey: false, shiftKey: false, altKey: false, metaKey: false
+        });
+    }
+
+    /**
+     * Send key-up for every key still considered held remotely.
+     *
+     * Called when the browser window loses focus, the tab is hidden, or the
+     * session ends. Modifier keys are released last so a synthetic combo can
+     * never be produced by the release order.
+     */
+    _releaseAllKeys() {
+        // Also drop any key the on-screen keyboard is holding.
+        if (this._keyboardActiveKey) this._releaseVirtualKeyboardState();
+        if (!this._pressedKeys.size) return;
+        if (!this._isConnected) {
+            this._pressedKeys.clear();
+            return;
+        }
+        const MODIFIERS = new Set([
+            'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight',
+            'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight', 'AltGraph'
+        ]);
+        const held = [...this._pressedKeys.entries()];
+        this._pressedKeys.clear();
+        // Release normal keys first, then modifiers.
+        held.sort((a, b) => (MODIFIERS.has(a[0]) ? 1 : 0) - (MODIFIERS.has(b[0]) ? 1 : 0));
+        for (const [code, tracked] of held) {
+            try {
+                this._sendMessage({
+                    type: 'key', action: 'up',
+                    key: tracked.key || '',
+                    code, keyCode: tracked.keyCode || 0,
+                    ctrlKey: false, shiftKey: false, altKey: false, metaKey: false
+                });
+            } catch {}
+        }
     }
 
     /** True when keyboard focus is on the IME field or the canvas. */
@@ -5071,10 +5219,42 @@ export class RDPClient {
      * @public
      */
     hideKeyboard() {
+        // Release anything the on-screen keyboard left pressed before hiding,
+        // otherwise a toggled modifier (Win/Ctrl/Alt) stays held on the remote
+        // and the next physical keystroke becomes a shortcut (Win+L, …).
+        this._releaseVirtualKeyboardState();
         this._el.keyboardOverlay.classList.remove('visible');
         this._keyboardVisible = false;
         this._resetKeyboardModifiers();
         this._emit('keyboardHide');
+    }
+
+    /**
+     * Release the on-screen keyboard's active key and modifier keys remotely.
+     * Safe to call when nothing is pressed.
+     */
+    _releaseVirtualKeyboardState() {
+        if (!this._isConnected) {
+            this._keyboardActiveKey = null;
+            return;
+        }
+        const activeKey = this._keyboardActiveKey;
+        if (activeKey) {
+            this._keyboardActiveKey = null;
+            activeKey.classList.remove('pressed');
+            const code = activeKey.dataset.code;
+            if (code) {
+                const keyName = activeKey.dataset.key || activeKey.textContent;
+                this._sendMessage({
+                    type: 'key', action: 'up',
+                    key: keyName, code, keyCode: 0,
+                    ctrlKey: false, shiftKey: false, altKey: false, metaKey: false
+                });
+            }
+            // Modifier downs are only sent alongside an active key, so only
+            // release them when we actually had one pressed.
+            this._sendActiveModifierUpEvents();
+        }
     }
     
     /**
