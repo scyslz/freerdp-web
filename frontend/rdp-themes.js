@@ -88,27 +88,28 @@
 // ============================================================
 
 /**
- * Dark theme - Default theme with deep blues
+ * Dark theme - Default theme: deep slate panels with a cyan accent
  */
 export const darkTheme = {
+    mode: 'dark',
     colors: {
-        background: '#1a1a2e',
-        surface: '#16213e',
-        border: '#0f3460',
-        text: '#eeeeee',
-        textMuted: '#888888',
-        accent: '#51cf66',
-        accentText: '#000000',
-        error: '#ff6b6b',
-        success: '#51cf66',
-        buttonBg: '#0f3460',
-        buttonHover: '#1a4a7a',
-        buttonText: '#eeeeee',
-        buttonActiveBg: '#51cf66',
-        buttonActiveText: '#000000',
-        inputBg: '#1a1a2e',
-        inputBorder: '#0f3460',
-        inputFocusBorder: '#51cf66',
+        background: '#0b0f17',
+        surface: '#131a27',
+        border: '#243147',
+        text: '#e7eefb',
+        textMuted: '#8d9cb5',
+        accent: '#22d3ee',
+        accentText: '#03212a',
+        error: '#f87171',
+        success: '#10b981',
+        buttonBg: '#1b2434',
+        buttonHover: '#263247',
+        buttonText: '#dbe6f7',
+        buttonActiveBg: '#22d3ee',
+        buttonActiveText: '#03212a',
+        inputBg: '#0e1520',
+        inputBorder: '#2a3a53',
+        inputFocusBorder: '#22d3ee',
     },
     typography: {
         fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
@@ -116,8 +117,8 @@ export const darkTheme = {
         fontSizeSmall: '0.85rem',
     },
     shape: {
-        borderRadius: '4px',
-        borderRadiusLarge: '8px',
+        borderRadius: '7px',
+        borderRadiusLarge: '12px',
     }
 };
 
@@ -125,24 +126,25 @@ export const darkTheme = {
  * Light theme - Clean light mode
  */
 export const lightTheme = {
+    mode: 'light',
     colors: {
-        background: '#f5f5f5',
+        background: '#f6f8fc',
         surface: '#ffffff',
-        border: '#e0e0e0',
-        text: '#1a1a1a',
-        textMuted: '#666666',
-        accent: '#2196f3',
+        border: '#dfe6f0',
+        text: '#101828',
+        textMuted: '#5a6678',
+        accent: '#0e7490',
         accentText: '#ffffff',
-        error: '#d32f2f',
-        success: '#388e3c',
-        buttonBg: '#e3e3e3',
-        buttonHover: '#d0d0d0',
-        buttonText: '#1a1a1a',
-        buttonActiveBg: '#2196f3',
+        error: '#b42318',
+        success: '#067647',
+        buttonBg: '#eef2f8',
+        buttonHover: '#e2e8f2',
+        buttonText: '#1d2939',
+        buttonActiveBg: '#0e7490',
         buttonActiveText: '#ffffff',
         inputBg: '#ffffff',
-        inputBorder: '#cccccc',
-        inputFocusBorder: '#2196f3',
+        inputBorder: '#cfd8e5',
+        inputFocusBorder: '#0e7490',
     },
     typography: {
         fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
@@ -150,8 +152,8 @@ export const lightTheme = {
         fontSizeSmall: '0.85rem',
     },
     shape: {
-        borderRadius: '4px',
-        borderRadiusLarge: '8px',
+        borderRadius: '7px',
+        borderRadiusLarge: '12px',
     }
 };
 
@@ -159,24 +161,25 @@ export const lightTheme = {
  * Midnight theme - Pure dark with purple accents
  */
 export const midnightTheme = {
+    mode: 'dark',
     colors: {
-        background: '#0d0d0d',
-        surface: '#1a1a1a',
-        border: '#333333',
-        text: '#e0e0e0',
-        textMuted: '#808080',
-        accent: '#bb86fc',
-        accentText: '#000000',
-        error: '#cf6679',
-        success: '#03dac6',
-        buttonBg: '#2d2d2d',
-        buttonHover: '#404040',
-        buttonText: '#e0e0e0',
-        buttonActiveBg: '#bb86fc',
-        buttonActiveText: '#000000',
-        inputBg: '#1a1a1a',
-        inputBorder: '#333333',
-        inputFocusBorder: '#bb86fc',
+        background: '#07070c',
+        surface: '#121219',
+        border: '#2b2b3b',
+        text: '#e6e6f0',
+        textMuted: '#8a8aa3',
+        accent: '#a78bfa',
+        accentText: '#140a2e',
+        error: '#fb7185',
+        success: '#2dd4bf',
+        buttonBg: '#1b1b26',
+        buttonHover: '#272735',
+        buttonText: '#e6e6f0',
+        buttonActiveBg: '#a78bfa',
+        buttonActiveText: '#140a2e',
+        inputBg: '#0e0e15',
+        inputBorder: '#2b2b3b',
+        inputFocusBorder: '#a78bfa',
     },
     typography: {
         fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
@@ -184,8 +187,8 @@ export const midnightTheme = {
         fontSizeSmall: '0.85rem',
     },
     shape: {
-        borderRadius: '4px',
-        borderRadiusLarge: '8px',
+        borderRadius: '7px',
+        borderRadiusLarge: '12px',
     }
 };
 
@@ -193,6 +196,7 @@ export const midnightTheme = {
  * High Contrast theme - Accessibility focused
  */
 export const highContrastTheme = {
+    mode: 'dark',
     colors: {
         background: '#000000',
         surface: '#000000',
@@ -201,7 +205,7 @@ export const highContrastTheme = {
         textMuted: '#ffff00',
         accent: '#00ff00',
         accentText: '#000000',
-        error: '#ff0000',
+        error: '#ff5555',
         success: '#00ff00',
         buttonBg: '#000000',
         buttonHover: '#333333',
@@ -218,8 +222,8 @@ export const highContrastTheme = {
         fontSizeSmall: '14px',
     },
     shape: {
-        borderRadius: '0px',
-        borderRadiusLarge: '0px',
+        borderRadius: '2px',
+        borderRadiusLarge: '2px',
     }
 };
 
@@ -257,7 +261,17 @@ export function resolveTheme(themeConfig = {}) {
     
     // Deep merge user overrides
     return {
-        colors: { ...baseTheme.colors, ...themeConfig.colors },
+        // `mode` lets the stylesheet pick light/dark-only values (shadows,
+        // scrim strength) without duplicating every colour token.
+        mode: themeConfig.mode || baseTheme.mode || 'dark',
+        preset: themeConfig.preset || 'dark',
+        colors: {
+            ...baseTheme.colors,
+            ...themeConfig.colors,
+            // Track whether the user supplied a custom background so derived
+            // surfaces can be computed from the right base.
+            _mode: themeConfig.mode || baseTheme.mode || 'dark',
+        },
         typography: { ...baseTheme.typography, ...themeConfig.typography },
         shape: { ...baseTheme.shape, ...themeConfig.shape },
     };
@@ -299,6 +313,37 @@ export function themeToCssVars(theme) {
             }
         }
     }
+
+    // Light/dark-only values: shadows are much softer on light surfaces, and
+    // the scrim needs to stay strong enough to isolate a dialog on white.
+    const mode = theme.mode || (theme.colors && theme.colors._mode) || 'dark';
+    if (mode === 'light') {
+        vars.push('--rdp-shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06)');
+        vars.push('--rdp-shadow-2: 0 6px 18px rgba(16, 24, 40, 0.10)');
+        vars.push('--rdp-shadow-3: 0 24px 56px rgba(16, 24, 40, 0.18)');
+        vars.push('--rdp-scrim: rgba(16, 24, 40, 0.42)');
+        // Flip derived surfaces so "elevated" reads as slightly darker/lighter
+        // relative to a white card instead of washing it out.
+        vars.push('--rdp-elevated: #ffffff');
+        vars.push('--rdp-sunken: color-mix(in srgb, var(--rdp-bg) 92%, #101828 8%)');
+        vars.push('--rdp-hairline: color-mix(in srgb, var(--rdp-border) 85%, transparent)');
+        // The picture area follows the theme too: a dark navy letterbox reads as
+        // a bug in light mode. Only a whisper of ink keeps it distinct from the
+        // page while leaving body text comfortably readable.
+        vars.push('--rdp-screen-bg: color-mix(in srgb, var(--rdp-bg) 96%, #101828 4%)');
+        vars.push('--rdp-grip: rgba(16, 24, 40, 0.28)');
+    } else {
+        vars.push('--rdp-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3)');
+        vars.push('--rdp-shadow-2: 0 6px 20px rgba(0, 0, 0, 0.4)');
+        vars.push('--rdp-shadow-3: 0 24px 64px rgba(0, 0, 0, 0.6)');
+        vars.push('--rdp-scrim: rgba(0, 0, 0, 0.68)');
+        vars.push('--rdp-elevated: color-mix(in srgb, var(--rdp-surface) 82%, #ffffff 18%)');
+        vars.push('--rdp-sunken: color-mix(in srgb, var(--rdp-bg) 88%, #000000 12%)');
+        vars.push('--rdp-hairline: color-mix(in srgb, var(--rdp-border) 70%, transparent)');
+        vars.push('--rdp-screen-bg: #05070b');
+        vars.push('--rdp-grip: rgba(255, 255, 255, 0.34)');
+    }
+    vars.push(`--rdp-color-scheme: ${mode}`);
     
     // Typography
     if (theme.typography) {

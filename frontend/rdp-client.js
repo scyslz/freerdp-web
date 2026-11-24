@@ -48,37 +48,92 @@ const STYLES = `
     display: block;
     width: 100%;
     height: 100%;
-    
+
     /* Typography */
     --rdp-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     --rdp-font-size: 14px;
     --rdp-font-size-small: 0.85rem;
-    
+    --rdp-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
     /* Colors - defaults (overridden by theme) */
-    --rdp-bg: #1a1a2e;
-    --rdp-surface: #16213e;
-    --rdp-border: #0f3460;
-    --rdp-text: #eeeeee;
-    --rdp-text-muted: #888888;
-    --rdp-accent: #51cf66;
-    --rdp-accent-text: #000000;
-    --rdp-error: #ff6b6b;
-    --rdp-success: #51cf66;
-    --rdp-btn-bg: #0f3460;
-    --rdp-btn-hover: #1a4a7a;
-    --rdp-btn-text: #eeeeee;
-    --rdp-btn-active-bg: #51cf66;
-    --rdp-btn-active-text: #000000;
-    --rdp-input-bg: #1a1a2e;
-    --rdp-input-border: #0f3460;
-    --rdp-input-focus-border: #51cf66;
-    
+    --rdp-bg: #0b0f17;
+    --rdp-surface: #131a27;
+    --rdp-border: #243147;
+    --rdp-text: #e7eefb;
+    --rdp-text-muted: #8d9cb5;
+    --rdp-accent: #22d3ee;
+    --rdp-accent-text: #03212a;
+    --rdp-error: #f87171;
+    --rdp-success: #10b981;
+    --rdp-btn-bg: #1b2434;
+    --rdp-btn-hover: #263247;
+    --rdp-btn-text: #dbe6f7;
+    --rdp-btn-active-bg: #22d3ee;
+    --rdp-btn-active-text: #03212a;
+    --rdp-input-bg: #0e1520;
+    --rdp-input-border: #2a3a53;
+    --rdp-input-focus-border: #22d3ee;
+
+    /* Derived surfaces - kept as tokens so every theme gets them for free.
+       The light theme overrides these in themeToCssVars(). */
+    --rdp-elevated: color-mix(in srgb, var(--rdp-surface) 82%, #ffffff 18%);
+    --rdp-sunken: color-mix(in srgb, var(--rdp-bg) 88%, #000000 12%);
+    --rdp-hairline: color-mix(in srgb, var(--rdp-border) 70%, transparent);
+    --rdp-scrim: color-mix(in srgb, #000000 68%, transparent);
+    --rdp-screen-bg: #05070b;
+    --rdp-grip: rgba(255, 255, 255, 0.34);
+
     /* Shape */
-    --rdp-border-radius: 4px;
-    --rdp-border-radius-lg: 8px;
-    
+    --rdp-border-radius: 7px;
+    --rdp-border-radius-lg: 12px;
+    --rdp-radius-pill: 999px;
+
+    /* Spacing rhythm (4 / 8) */
+    --rdp-space-1: 4px;
+    --rdp-space-2: 8px;
+    --rdp-space-3: 12px;
+    --rdp-space-4: 16px;
+    --rdp-space-5: 24px;
+
+    /* Control sizing */
+    --rdp-control-height: 34px;
+    --rdp-control-height-sm: 28px;
+    --rdp-icon-size: 17px;
+
+    /* Elevation */
+    --rdp-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --rdp-shadow-2: 0 6px 20px rgba(0, 0, 0, 0.4);
+    --rdp-shadow-3: 0 24px 64px rgba(0, 0, 0, 0.6);
+
+    /* Motion - shared durations so every transition stays consistent */
+    --rdp-duration-fast: 120ms;
+    --rdp-duration: 180ms;
+    --rdp-ease: cubic-bezier(0.2, 0, 0.2, 1);
+
+    /* Focus ring - a surface-colored gap keeps it visible on any background */
+    --rdp-focus-ring: 0 0 0 2px var(--rdp-surface), 0 0 0 4px var(--rdp-accent);
+
     font-family: var(--rdp-font-family);
     font-size: var(--rdp-font-size);
+    color: var(--rdp-text);
+}
+
+/* Keyboard focus must always be visible; pointer clicks stay quiet.
+   The hidden IME field is excluded because it is never user-facing. */
+button:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible:not(.rdp-ime) {
+    outline: none;
+    box-shadow: var(--rdp-focus-ring);
+}
+
+/* Respect users who ask the OS to reduce motion. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+    }
 }
 
 * {
@@ -88,6 +143,7 @@ const STYLES = `
 }
 
 .rdp-container {
+    position: relative;
     display: flex;
     flex-direction: column;
     width: 100%;
@@ -95,189 +151,19 @@ const STYLES = `
     background: var(--rdp-bg);
     color: var(--rdp-text);
     overflow: hidden;
+    isolation: isolate;
 }
 
-/* Top Bar */
-.rdp-topbar {
-    background: var(--rdp-surface);
-    padding: 4px 12px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    border-bottom: 1px solid var(--rdp-border);
-    flex-shrink: 0;
-}
-
-.rdp-topbar.hidden { display: none; }
-
-/* Fullscreen: true fullscreen - hide bars, remove padding/black borders */
-.rdp-container.fs-autohide { position: relative; }
-.rdp-container.fs-autohide .rdp-screen-wrapper {
-    padding: 0;
-}
-.rdp-container.fs-autohide .rdp-screen {
-    border: none;
-    border-radius: 0;
-}
-.rdp-container.fs-autohide .rdp-screen canvas {
-    width: 100%;
-    height: 100%;
-    max-width: none;
-    max-height: none;
-    object-fit: fill;
-}
-.rdp-container.fs-autohide .rdp-topbar,
-.rdp-container.fs-autohide .rdp-bottombar {
-    display: none;
-}
-
-.rdp-status {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--rdp-font-size-small);
-}
-
-.rdp-status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--rdp-error);
-    transition: background 0.3s;
-}
-
-.rdp-status-dot.connected { background: var(--rdp-success); }
-
-.rdp-controls {
-    margin-left: auto;
-    display: flex;
-    gap: 6px;
-}
-
-.rdp-btn {
-    background: var(--rdp-btn-bg);
-    border: none;
-    color: var(--rdp-btn-text);
-    padding: 4px 10px;
-    border-radius: var(--rdp-border-radius);
-    cursor: pointer;
-    font-size: var(--rdp-font-size-small);
-    font-family: inherit;
-    line-height: 1.4;
-    transition: background 0.2s, color 0.2s;
-}
-
-.rdp-btn:hover { background: var(--rdp-btn-hover); }
-.rdp-btn:active { background: var(--rdp-btn-active-bg); color: var(--rdp-btn-active-text); }
-.rdp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.rdp-btn-reconnect.on { background: var(--rdp-btn-active-bg); color: var(--rdp-btn-active-text); }
-
-/* Overflow Menu */
-.rdp-overflow-container {
-    position: relative;
-}
-
-.rdp-btn-overflow {
-    display: none;
-    font-size: var(--rdp-font-size-small);
-    padding: 4px 8px;
-}
-
-.rdp-btn-overflow.visible {
-    display: inline-flex;
-}
-
-.rdp-overflow-dropdown {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    margin-top: 4px;
-    background: var(--rdp-surface);
-    border: 1px solid var(--rdp-border);
-    border-radius: var(--rdp-border-radius);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    display: none;
-    flex-direction: column;
-    min-width: 140px;
-    z-index: 100;
-    padding: 4px 0;
-}
-
-.rdp-overflow-dropdown.open {
-    display: flex;
-}
-
-.rdp-overflow-dropdown .rdp-btn {
-    border-radius: 0;
-    text-align: left;
-    justify-content: flex-start;
-    white-space: nowrap;
-}
-
-.rdp-overflow-dropdown .rdp-btn:first-child {
-    border-radius: var(--rdp-border-radius) var(--rdp-border-radius) 0 0;
-}
-
-.rdp-overflow-dropdown .rdp-btn:last-child {
-    border-radius: 0 0 var(--rdp-border-radius) var(--rdp-border-radius);
-}
-
-.rdp-btn.rdp-collapsed {
-    display: none !important;
-}
-
-/* No word wrapping, single line text for buttons */
-.rdp-btn-no-wrap {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 200px;
-}
-
-/* Toast - transient feedback (clipboard push, errors, ...) */
-.rdp-toast {
-    position: absolute;
-    left: 50%;
-    bottom: 14px;
-    transform: translate(-50%, 8px);
-    max-width: 90%;
-    padding: 7px 14px;
-    border-radius: var(--rdp-border-radius);
-    background: rgba(0, 0, 0, 0.82);
-    border: 1px solid var(--rdp-border);
-    color: var(--rdp-text);
-    font-size: var(--rdp-font-size-small);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.2s ease, transform 0.2s ease;
-    z-index: 200;
-}
-
-.rdp-toast.show {
-    opacity: 1;
-    transform: translate(-50%, 0);
-}
-
-.rdp-toast.success {
-    border-color: var(--rdp-success);
-    color: var(--rdp-success);
-}
-
-.rdp-toast.error {
-    border-color: var(--rdp-error);
-    color: var(--rdp-error);
-}
-
-/* Screen Area */
+/* -------------------------------------------------- Screen (the primary surface)
+   The remote desktop fills the entire component. Chrome floats above it and
+   auto-hides, so the picture never loses rows to toolbars. */
 .rdp-screen-wrapper {
+    position: relative;
     flex: 1;
     display: flex;
     justify-content: center;
     align-items: stretch;
-    padding: 8px;
+    padding: 0;
     min-height: 0;
     /* Scrolling controlled via CSS custom properties - only scroll when needed */
     overflow-x: var(--rdp-overflow-x, hidden);
@@ -285,18 +171,18 @@ const STYLES = `
 }
 
 .rdp-screen {
-    background: #000;
-    border: 2px solid var(--rdp-border);
-    border-radius: var(--rdp-border-radius);
-    overflow: hidden;
     position: relative;
     flex: 1;
-    min-height: 200px;
     display: flex;
     justify-content: center;
     align-items: center;
+    min-height: 0;
     /* Minimum dimensions from options (0 = auto) */
     min-width: var(--rdp-screen-min-width, 0);
+    background: var(--rdp-screen-bg, #05070b);
+    border: none;
+    border-radius: 0;
+    overflow: hidden;
 }
 
 .rdp-screen canvas {
@@ -308,7 +194,604 @@ const STYLES = `
     max-height: 100%;
 }
 
-/* API Cursor Overlay - shown when using programmatic mouse API */
+/* -------------------------------------------------- Floating HUD
+   A compact panel that can dock to any of the four screen edges. It shrinks to
+   its content so it covers as little of the remote desktop as possible, and
+   folds away completely when idle.
+
+   Docking is driven by data-hud-dock on the container:
+     top / bottom    -> horizontal row of tools
+     left / right    -> vertical stack of tools
+   The same markup serves all four orientations; only layout direction and the
+   edge offsets change, so no duplicated templates are needed. */
+.rdp-hud {
+    position: absolute;
+    z-index: 40;
+    display: flex;
+    background: color-mix(in srgb, var(--rdp-surface) 90%, transparent);
+    border: 1px solid var(--rdp-border);
+    border-radius: var(--rdp-border-radius-lg);
+    box-shadow: var(--rdp-shadow-2);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    transition: opacity var(--rdp-duration) var(--rdp-ease),
+                transform var(--rdp-duration) var(--rdp-ease),
+                visibility var(--rdp-duration) var(--rdp-ease);
+}
+
+.rdp-topbar {
+    display: flex;
+    align-items: center;
+    min-height: 0;
+}
+
+.rdp-bottombar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--rdp-space-3);
+    font-size: var(--rdp-font-size-small);
+    color: var(--rdp-text-muted);
+}
+
+.rdp-topbar.hidden,
+.rdp-bottombar.hidden { display: none; }
+
+/* Nothing to show at all - do not leave an empty floating shell. */
+.rdp-hud.hidden,
+.rdp-hud-handle.hidden { display: none !important; }
+
+/* -------------------------------------------------- Dock: TOP / BOTTOM (row) */
+.rdp-container[data-hud-dock="top"],
+.rdp-container[data-hud-dock="bottom"] { --rdp-hud-axis: row; }
+
+.rdp-container[data-hud-dock="top"] .rdp-hud,
+.rdp-container[data-hud-dock="bottom"] .rdp-hud {
+    left: 50%;
+    flex-direction: column;
+    width: max-content;
+    max-width: calc(100% - (2 * var(--rdp-space-4)));
+    transform: translateX(-50%);
+}
+
+.rdp-container[data-hud-dock="top"] .rdp-hud { top: var(--rdp-space-3); transform-origin: top center; }
+.rdp-container[data-hud-dock="bottom"] .rdp-hud { bottom: var(--rdp-space-3); transform-origin: bottom center; }
+
+.rdp-container[data-hud-dock="top"] .rdp-topbar,
+.rdp-container[data-hud-dock="bottom"] .rdp-topbar {
+    flex-direction: row;
+    gap: var(--rdp-space-3);
+    padding: var(--rdp-space-1) var(--rdp-space-1) var(--rdp-space-1) var(--rdp-space-3);
+}
+
+.rdp-container[data-hud-dock="top"] .rdp-bottombar,
+.rdp-container[data-hud-dock="bottom"] .rdp-bottombar {
+    justify-content: space-between;
+    gap: var(--rdp-space-4);
+    padding: var(--rdp-space-1) var(--rdp-space-3);
+    min-height: 26px;
+    border-top: 1px solid var(--rdp-hairline);
+}
+
+/* Flipped stacking when docked to the bottom, so the divider stays between rows. */
+.rdp-container[data-hud-dock="bottom"] .rdp-hud { flex-direction: column-reverse; }
+.rdp-container[data-hud-dock="bottom"] .rdp-bottombar { border-top: none; border-bottom: 1px solid var(--rdp-hairline); }
+
+/* -------------------------------------------------- Dock: LEFT / RIGHT
+   Tools still stack into a column, but the connection info is laid out
+   horizontally underneath them - reading left-to-right is far easier than a
+   rotated strip, and it keeps the rail narrow. */
+.rdp-container[data-hud-dock="left"] .rdp-hud,
+.rdp-container[data-hud-dock="right"] .rdp-hud {
+    top: 50%;
+    flex-direction: column;
+    align-items: stretch;
+    width: max-content;
+    max-width: calc(100% - (2 * var(--rdp-space-4)));
+    transform: translateY(-50%);
+}
+
+.rdp-container[data-hud-dock="left"] .rdp-hud { left: var(--rdp-space-3); transform-origin: left center; }
+.rdp-container[data-hud-dock="right"] .rdp-hud { right: var(--rdp-space-3); transform-origin: right center; }
+
+.rdp-container[data-hud-dock="left"] .rdp-topbar,
+.rdp-container[data-hud-dock="right"] .rdp-topbar {
+    flex-direction: column;
+    align-items: center;
+    gap: var(--rdp-space-1);
+    padding: var(--rdp-space-2) var(--rdp-space-1);
+}
+
+.rdp-container[data-hud-dock="left"] .rdp-controls,
+.rdp-container[data-hud-dock="right"] .rdp-controls {
+    flex-direction: column;
+    align-items: center;
+    margin-left: 0;
+    gap: var(--rdp-space-1);
+}
+
+/* The info strip stacks on two lines in the rail: latency on top, the route
+   picker below. Two short rows read better than one cramped row in a column. */
+.rdp-container[data-hud-dock="left"] .rdp-bottombar,
+.rdp-container[data-hud-dock="right"] .rdp-bottombar {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: var(--rdp-space-1);
+    padding: var(--rdp-space-2) var(--rdp-space-1);
+    min-width: 0;
+    border-top: 1px solid var(--rdp-hairline);
+}
+.rdp-container[data-hud-dock="left"] .rdp-bottombar { border-left: none; }
+.rdp-container[data-hud-dock="right"] .rdp-bottombar { border-right: none; }
+
+/* Keep the transport word horizontal - it gets its own row. */
+.rdp-container[data-hud-dock="left"] .rdp-transport,
+.rdp-container[data-hud-dock="right"] .rdp-transport {
+    writing-mode: horizontal-tb;
+    padding: 2px var(--rdp-space-2);
+    font-size: 0.66rem;
+}
+
+.rdp-container[data-hud-dock="left"] .rdp-transport-dot,
+.rdp-container[data-hud-dock="right"] .rdp-transport-dot {
+    margin-bottom: 0;
+}
+
+/* -------------------------------------------------- HUD grip
+   Deliberately tiny and inert unless targeted: this is the ONLY way to
+   reopen the panel, so ordinary pointer movement never pops it open. */
+.rdp-hud-handle {
+    position: absolute;
+    z-index: 41;
+    display: none;
+    padding: 0;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+}
+
+.rdp-hud-handle::before {
+    content: '';
+    position: absolute;
+    border-radius: var(--rdp-radius-pill);
+    background: var(--rdp-grip, rgba(255, 255, 255, 0.34));
+    box-shadow: var(--rdp-shadow-1);
+    transition: background var(--rdp-duration-fast) var(--rdp-ease),
+                transform var(--rdp-duration-fast) var(--rdp-ease);
+}
+
+/* The grip only exists while the panel is folded away. */
+.rdp-container.rdp-chrome-autohide.rdp-chrome-hidden .rdp-hud-handle { display: block; }
+
+/* Grip geometry per dock: a horizontal bar on top/bottom, a vertical bar on
+   the sides, always positioned on the edge the panel would slide from. */
+.rdp-container[data-hud-dock="top"] .rdp-hud-handle,
+.rdp-container[data-hud-dock="bottom"] .rdp-hud-handle {
+    left: 50%;
+    width: 64px;
+    height: 14px;
+    transform: translateX(-50%);
+}
+.rdp-container[data-hud-dock="top"] .rdp-hud-handle { top: 0; }
+.rdp-container[data-hud-dock="bottom"] .rdp-hud-handle { bottom: 0; }
+
+.rdp-container[data-hud-dock="top"] .rdp-hud-handle::before,
+.rdp-container[data-hud-dock="bottom"] .rdp-hud-handle::before {
+    left: 50%;
+    width: 36px;
+    height: 4px;
+    transform: translateX(-50%);
+}
+.rdp-container[data-hud-dock="top"] .rdp-hud-handle::before { top: 4px; }
+.rdp-container[data-hud-dock="bottom"] .rdp-hud-handle::before { bottom: 4px; }
+
+.rdp-container[data-hud-dock="left"] .rdp-hud-handle,
+.rdp-container[data-hud-dock="right"] .rdp-hud-handle {
+    top: 50%;
+    width: 14px;
+    height: 64px;
+    transform: translateY(-50%);
+}
+.rdp-container[data-hud-dock="left"] .rdp-hud-handle { left: 0; }
+.rdp-container[data-hud-dock="right"] .rdp-hud-handle { right: 0; }
+
+.rdp-container[data-hud-dock="left"] .rdp-hud-handle::before,
+.rdp-container[data-hud-dock="right"] .rdp-hud-handle::before {
+    top: 50%;
+    width: 4px;
+    height: 36px;
+    transform: translateY(-50%);
+}
+.rdp-container[data-hud-dock="left"] .rdp-hud-handle::before { left: 4px; }
+.rdp-container[data-hud-dock="right"] .rdp-hud-handle::before { right: 4px; }
+
+.rdp-hud-handle:hover::before,
+.rdp-hud-handle:focus-visible::before {
+    background: var(--rdp-accent);
+}
+.rdp-container[data-hud-dock="top"] .rdp-hud-handle:hover::before,
+.rdp-container[data-hud-dock="bottom"] .rdp-hud-handle:hover::before {
+    width: 46px;
+}
+.rdp-container[data-hud-dock="left"] .rdp-hud-handle:hover::before,
+.rdp-container[data-hud-dock="right"] .rdp-hud-handle:hover::before {
+    height: 46px;
+}
+
+/* Enlarge the pointer target without enlarging the visible grip. */
+.rdp-hud-handle::after {
+    content: '';
+    position: absolute;
+    inset: -6px -24px;
+}
+.rdp-container[data-hud-dock="left"] .rdp-hud-handle::after,
+.rdp-container[data-hud-dock="right"] .rdp-hud-handle::after {
+    inset: -24px -6px;
+}
+
+/* -------------------------------------------------- Collapsed state */
+.rdp-container.rdp-chrome-autohide.rdp-chrome-hidden .rdp-hud {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.rdp-container[data-hud-dock="top"].rdp-chrome-hidden .rdp-hud {
+    transform: translateX(-50%) translateY(-10px) scale(0.96);
+}
+.rdp-container[data-hud-dock="bottom"].rdp-chrome-hidden .rdp-hud {
+    transform: translateX(-50%) translateY(10px) scale(0.96);
+}
+.rdp-container[data-hud-dock="left"].rdp-chrome-hidden .rdp-hud {
+    transform: translateY(-50%) translateX(-10px) scale(0.96);
+}
+.rdp-container[data-hud-dock="right"].rdp-chrome-hidden .rdp-hud {
+    transform: translateY(-50%) translateX(10px) scale(0.96);
+}
+
+/* -------------------------------------------------- Fullscreen */
+.rdp-container.fs-autohide[data-hud-dock="top"] .rdp-hud { top: var(--rdp-space-2); }
+.rdp-container.fs-autohide[data-hud-dock="bottom"] .rdp-hud { bottom: var(--rdp-space-2); }
+.rdp-container.fs-autohide[data-hud-dock="left"] .rdp-hud { left: var(--rdp-space-2); }
+.rdp-container.fs-autohide[data-hud-dock="right"] .rdp-hud { right: var(--rdp-space-2); }
+
+/* -------------------------------------------------- Status
+   Doubles as the connect trigger: when idle it opens the connection dialog,
+   which is why the standalone Connect button was removed (it duplicated this
+   and the large "+" on the empty screen).
+
+   Icon-only: the state reads from the glyph (ring + check when live, plain
+   ring when off, circle + bang on error). The text stays in the DOM for screen
+   readers only, so no visual label is needed. */
+.rdp-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--rdp-control-height);
+    height: var(--rdp-control-height);
+    flex-shrink: 0;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--rdp-radius-pill);
+    color: var(--rdp-text-muted);
+    cursor: pointer;
+    font-family: inherit;
+    transition: color var(--rdp-duration) var(--rdp-ease),
+                background var(--rdp-duration-fast) var(--rdp-ease);
+}
+
+.rdp-status:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--rdp-accent) 16%, transparent);
+    color: var(--rdp-accent);
+}
+
+/* Once connected there is nothing to open; the icon becomes a plain indicator. */
+.rdp-status[data-state="connected"] { cursor: default; }
+.rdp-status[data-state="connected"]:hover { background: transparent; }
+
+.rdp-status[data-state="connected"] { color: var(--rdp-success); }
+.rdp-status[data-state="connecting"] { color: var(--rdp-accent); cursor: progress; }
+.rdp-status[data-state="error"] { color: var(--rdp-error); }
+
+.rdp-status-icon {
+    position: relative;
+    display: inline-flex;
+    width: var(--rdp-icon-size);
+    height: var(--rdp-icon-size);
+}
+
+.rdp-status-glyph {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    transition: opacity var(--rdp-duration) var(--rdp-ease);
+}
+
+/* Only one glyph is visible per state. */
+.rdp-status[data-state="disconnected"] .rdp-glyph-off,
+.rdp-status[data-state="connected"] .rdp-glyph-on,
+.rdp-status[data-state="error"] .rdp-glyph-error { opacity: 1; }
+
+/* Connecting reuses the "off" ring, pulsing to show work in progress. */
+.rdp-status[data-state="connecting"] .rdp-glyph-off {
+    opacity: 1;
+    animation: rdp-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes rdp-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+/* Theme toggle: two stacked glyphs, only the one you would switch TO shows.
+   Both are absolutely positioned inside the button's icon box so the button
+   aligns exactly like every other icon button in the rail. */
+.rdp-btn-theme { position: relative; }
+
+.rdp-theme-glyph {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    width: var(--rdp-icon-size);
+    height: var(--rdp-icon-size);
+    opacity: 0;
+    transition: opacity var(--rdp-duration) var(--rdp-ease);
+}
+
+.rdp-container[data-theme-mode="dark"] .rdp-glyph-sun { opacity: 1; }
+.rdp-container[data-theme-mode="light"] .rdp-glyph-moon { opacity: 1; }
+
+/* Light mode: the glass panel needs a touch more opacity and a firmer edge to
+   stay legible over bright screenshots. */
+.rdp-container[data-theme-mode="light"] .rdp-hud {
+    background: color-mix(in srgb, var(--rdp-surface) 94%, transparent);
+    border-color: color-mix(in srgb, var(--rdp-border) 92%, #101828 8%);
+}
+
+.rdp-container[data-theme-mode="light"] .rdp-screen {
+    /* A hairline plus a soft inner shade separates the picture area from the
+       light page background without boxing it in. */
+    box-shadow:
+        inset 0 0 0 1px rgba(16, 24, 40, 0.12),
+        inset 0 2px 10px rgba(16, 24, 40, 0.06);
+}
+
+/* The grip sits on the remote desktop, so it needs a dark mark on light UIs. */
+.rdp-container[data-theme-mode="light"] .rdp-hud-handle::before {
+    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.35);
+}
+
+/* Visually hidden but still announced (status text, screen-reader labels). */
+.rdp-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* -------------------------------------------------- Controls */
+.rdp-controls {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--rdp-space-1);
+}
+
+.rdp-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--rdp-space-1);
+    background: var(--rdp-btn-bg);
+    border: 1px solid var(--rdp-hairline);
+    color: var(--rdp-btn-text);
+    padding: 0 var(--rdp-space-3);
+    height: var(--rdp-control-height);
+    border-radius: var(--rdp-border-radius);
+    cursor: pointer;
+    font-size: var(--rdp-font-size-small);
+    font-family: inherit;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    transition: background var(--rdp-duration-fast) var(--rdp-ease),
+                color var(--rdp-duration-fast) var(--rdp-ease),
+                border-color var(--rdp-duration-fast) var(--rdp-ease),
+                box-shadow var(--rdp-duration-fast) var(--rdp-ease),
+                transform var(--rdp-duration-fast) var(--rdp-ease);
+}
+
+.rdp-btn:hover:not(:disabled) {
+    background: var(--rdp-btn-hover);
+    border-color: color-mix(in srgb, var(--rdp-accent) 35%, var(--rdp-border));
+    box-shadow: var(--rdp-shadow-1);
+}
+
+.rdp-btn:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: none;
+}
+
+.rdp-btn:disabled { opacity: 0.42; cursor: not-allowed; }
+
+/* Danger-tinted while a session is live, so Disconnect reads as the exit. */
+.rdp-btn.rdp-btn-icon.rdp-btn-disconnect:not(:disabled):hover {
+    background: color-mix(in srgb, var(--rdp-error) 18%, transparent);
+    border-color: color-mix(in srgb, var(--rdp-error) 40%, transparent);
+    color: var(--rdp-error);
+}
+
+/* Reconnect is a stateful toggle: subtle when off, accented when on. */
+.rdp-btn.rdp-btn-icon.rdp-btn-reconnect.on {
+    background: color-mix(in srgb, var(--rdp-success) 18%, transparent);
+    border-color: color-mix(in srgb, var(--rdp-success) 45%, transparent);
+    color: var(--rdp-success);
+}
+
+/* Icon buttons keep a square hit area even though the glyph is smaller. */
+/* Icon buttons are a fixed square so every glyph shares one optical centre.
+   flex: 0 0 auto prevents the rail from shrinking them out of alignment. */
+.rdp-btn.rdp-btn-icon {
+    flex: 0 0 auto;
+    width: var(--rdp-control-height);
+    min-width: var(--rdp-control-height);
+    height: var(--rdp-control-height);
+    padding: 0;
+    background: transparent;
+    border-color: transparent;
+    color: var(--rdp-text-muted);
+}
+.rdp-btn.rdp-btn-icon:hover:not(:disabled) {
+    background: var(--rdp-btn-hover);
+    color: var(--rdp-text);
+    border-color: var(--rdp-hairline);
+}
+
+/* Pin button reflects a persistent "keep controls visible" toggle. */
+.rdp-btn.rdp-btn-pin.on {
+    background: color-mix(in srgb, var(--rdp-accent) 18%, transparent);
+    border-color: color-mix(in srgb, var(--rdp-accent) 45%, transparent);
+    color: var(--rdp-accent);
+}
+.rdp-btn-icon svg {
+    width: var(--rdp-icon-size);
+    height: var(--rdp-icon-size);
+    display: block;
+    flex-shrink: 0;
+}
+
+/* Hidden IME anchor still needs a focusable box, kept out of layout. */
+/* -------------------------------------------------- Overflow menu */
+.rdp-overflow-container { position: relative; }
+
+.rdp-btn-overflow { display: none; }
+.rdp-btn.rdp-btn-overflow.visible { display: inline-flex; }
+
+.rdp-overflow-dropdown {
+    position: absolute;
+    top: calc(100% + var(--rdp-space-1));
+    right: 0;
+    background: var(--rdp-elevated);
+    border: 1px solid var(--rdp-border);
+    border-radius: var(--rdp-border-radius-lg);
+    box-shadow: var(--rdp-shadow-2);
+    display: none;
+    flex-direction: column;
+    min-width: 184px;
+    z-index: 100;
+    padding: var(--rdp-space-1);
+    gap: 2px;
+    animation: rdp-pop-in var(--rdp-duration) var(--rdp-ease);
+}
+
+/* Open toward the picture, not off-screen, on vertical rails. */
+.rdp-container[data-hud-dock="left"] .rdp-overflow-dropdown {
+    top: 0;
+    right: auto;
+    left: calc(100% + var(--rdp-space-2));
+}
+.rdp-container[data-hud-dock="right"] .rdp-overflow-dropdown {
+    top: 0;
+    right: calc(100% + var(--rdp-space-2));
+}
+/* Dock to the bottom edge: drop the menu upward so it stays on screen. */
+.rdp-container[data-hud-dock="bottom"] .rdp-overflow-dropdown {
+    top: auto;
+    bottom: calc(100% + var(--rdp-space-1));
+}
+
+.rdp-overflow-dropdown.open { display: flex; }
+
+.rdp-overflow-dropdown .rdp-btn {
+    justify-content: flex-start;
+    min-height: 34px;
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+    font-weight: 500;
+}
+.rdp-overflow-dropdown .rdp-btn:hover:not(:disabled) {
+    background: var(--rdp-btn-hover);
+}
+
+.rdp-btn-menu-item svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+}
+
+@keyframes rdp-pop-in {
+    from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.rdp-btn.rdp-collapsed { display: none !important; }
+
+/* Single-line button labels */
+.rdp-btn-no-wrap {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+}
+
+/* -------------------------------------------------- Toast */
+.rdp-toast {
+    position: absolute;
+    left: 50%;
+    bottom: 58px;   /* clears the floating bottom bar */
+    display: inline-flex;
+    align-items: center;
+    gap: var(--rdp-space-2);
+    transform: translate(-50%, 10px);
+    max-width: min(90%, 520px);
+    padding: var(--rdp-space-2) var(--rdp-space-4);
+    border-radius: var(--rdp-radius-pill);
+    background: var(--rdp-elevated);
+    border: 1px solid var(--rdp-border);
+    box-shadow: var(--rdp-shadow-2);
+    color: var(--rdp-text);
+    font-size: var(--rdp-font-size-small);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--rdp-duration) var(--rdp-ease),
+                transform var(--rdp-duration) var(--rdp-ease);
+    z-index: 200;
+}
+
+.rdp-toast::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--rdp-accent);
+    flex-shrink: 0;
+}
+
+.rdp-toast.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+
+.rdp-toast.success { border-color: color-mix(in srgb, var(--rdp-success) 55%, transparent); }
+.rdp-toast.success::before { background: var(--rdp-success); }
+.rdp-toast.error { border-color: color-mix(in srgb, var(--rdp-error) 55%, transparent); }
+.rdp-toast.error::before { background: var(--rdp-error); }
+
+/* -------------------------------------------------- API cursor */
 .rdp-api-cursor {
     position: absolute;
     pointer-events: none;
@@ -316,75 +799,85 @@ const STYLES = `
     display: none;
     transform: translate(-2px, -2px);
 }
-
-.rdp-api-cursor.visible {
-    display: block;
-}
-
+.rdp-api-cursor.visible { display: block; }
 .rdp-api-cursor-icon {
     width: 24px;
     height: 24px;
     filter: drop-shadow(1px 1px 2px rgba(0, 0, 0, 0.7));
 }
 
+/* -------------------------------------------------- Empty / loading state */
 .rdp-loading {
     position: absolute;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     text-align: center;
+    gap: var(--rdp-space-3);
+    padding: var(--rdp-space-5);
+    border-radius: var(--rdp-border-radius-lg);
+}
+
+.rdp-loading:focus-visible {
+    box-shadow: var(--rdp-focus-ring);
+    outline: none;
 }
 
 .rdp-loading p {
-    color: #ccc;
+    max-width: 32ch;
+    color: var(--rdp-text-muted);
+    font-size: var(--rdp-font-size-small);
+    line-height: 1.5;
+    letter-spacing: 0.01em;
 }
 
+/* Idle: a "+" affordance instead of a spinner; clicking opens the modal. */
+
 .rdp-spinner {
-    width: 36px;
-    height: 36px;
-    border: 3px solid #333;
+    width: 34px;
+    height: 34px;
+    border: 2px solid color-mix(in srgb, var(--rdp-border) 90%, transparent);
     border-top-color: var(--rdp-accent);
     border-radius: 50%;
-    animation: rdp-spin 1s linear infinite;
-    margin: 0 auto 12px;
+    animation: rdp-spin 0.9s linear infinite;
 }
 
 @keyframes rdp-spin {
     to { transform: rotate(360deg); }
 }
 
-/* Idle state (not connecting/reconnecting): show a "+" affordance instead of a
-   spinning loader. Clicking it opens the connection modal to add another host. */
+/* Idle: a "+" affordance instead of a spinner; clicking opens the modal. */
 .rdp-plus {
     display: none;
-    width: 58px;
-    height: 58px;
-    margin: 0 auto 14px;
+    width: 64px;
+    height: 64px;
     align-items: center;
     justify-content: center;
-    border: 2px solid var(--rdp-accent);
+    border: 1px solid color-mix(in srgb, var(--rdp-accent) 55%, transparent);
     border-radius: 50%;
     color: var(--rdp-accent);
-    box-shadow: 0 0 0 0 rgba(81, 207, 102, 0.35);
-    transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+    background: color-mix(in srgb, var(--rdp-accent) 8%, transparent);
+    transition: background var(--rdp-duration) var(--rdp-ease),
+                color var(--rdp-duration) var(--rdp-ease),
+                box-shadow var(--rdp-duration) var(--rdp-ease),
+                transform var(--rdp-duration) var(--rdp-ease);
 }
 
-.rdp-plus svg {
-    width: 28px;
-    height: 28px;
-    display: block;
-}
+.rdp-plus svg { width: 26px; height: 26px; display: block; }
 
 .rdp-loading.idle .rdp-spinner { display: none; }
 .rdp-loading.idle .rdp-plus { display: flex; }
 .rdp-loading.idle:hover .rdp-plus {
     background: var(--rdp-accent);
-    color: var(--rdp-surface);
-    transform: scale(1.06);
-    box-shadow: 0 0 0 8px rgba(81, 207, 102, 0.12);
+    color: var(--rdp-accent-text);
+    transform: translateY(-1px);
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--rdp-accent) 10%, transparent);
 }
 
-/* Hidden, focusable text field that captures IME composition (CJK / dead keys).
+/* Hidden, focusable field that captures IME composition (CJK / dead keys).
    It must be an editable element for the browser IME to deliver characters. */
 .rdp-ime {
     position: absolute;
@@ -407,175 +900,316 @@ const STYLES = `
     font-size: 16px; /* prevent iOS zoom-on-focus */
 }
 
-/* Bottom Bar */
-.rdp-bottombar {
-    background: var(--rdp-surface);
-    padding: 6px 16px;
-    font-size: var(--rdp-font-size-small);
-    color: var(--rdp-text-muted);
-    display: flex;
-    justify-content: space-between;
-    border-top: 1px solid var(--rdp-border);
+/* -------------------------------------------------- Bottom bar internals
+   Metrics are icon + value, with the label carried by the title attribute and
+   an aria-label, so no visible text is wasted on "Resolution:" / "Latency:". */
+.rdp-metric {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--rdp-space-1);
     flex-shrink: 0;
+    white-space: nowrap;
+    border-radius: var(--rdp-border-radius);
+    padding: 0 2px;
 }
 
-.rdp-bottombar.hidden { display: none; }
+.rdp-metric-icon {
+    width: 13px;
+    height: 13px;
+    flex-shrink: 0;
+    color: color-mix(in srgb, var(--rdp-text-muted) 80%, transparent);
+}
 
+.rdp-metric-value {
+    font-family: var(--rdp-font-mono);
+    font-size: 0.74rem;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    color: var(--rdp-text-muted);
+}
+
+/* Transport badge doubles as the route picker trigger */
 .rdp-transport {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 1px 8px;
-    border-radius: 999px;
+    gap: var(--rdp-space-2);
+    padding: 2px var(--rdp-space-2);
+    border-radius: var(--rdp-radius-pill);
     border: 1px solid var(--rdp-border);
-    background: rgba(255, 255, 255, 0.03);
+    background: color-mix(in srgb, var(--rdp-text) 5%, transparent);
+    font-family: var(--rdp-font-mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
     white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    transition: border-color var(--rdp-duration-fast) var(--rdp-ease),
+                color var(--rdp-duration-fast) var(--rdp-ease),
+                background var(--rdp-duration-fast) var(--rdp-ease);
 }
+.rdp-transport.rdp-transport-ws { color: var(--rdp-text-muted); }
 .rdp-transport.rdp-transport-rtc {
     color: var(--rdp-success);
-    border-color: var(--rdp-success);
+    border-color: color-mix(in srgb, var(--rdp-success) 45%, transparent);
+    background: color-mix(in srgb, var(--rdp-success) 10%, transparent);
 }
-.rdp-transport.rdp-transport-ws {
-    color: var(--rdp-text-muted);
-}
+.rdp-transport:hover { background: color-mix(in srgb, var(--rdp-text) 10%, transparent); }
+
 .rdp-transport-dot {
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     background: currentColor;
 }
-.rdp-transport {
-    cursor: pointer;
-    user-select: none;
-}
-.rdp-transport:hover {
-    filter: brightness(1.3);
-}
-.rdp-bottombar-right {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-}
-.rdp-route-pop {
+
+/* -------------------------------------------------- Dock picker */
+.rdp-dock-pop {
     position: absolute;
-    right: 12px;
-    bottom: 34px;
-    min-width: 240px;
-    background: var(--rdp-surface);
+    min-width: 168px;
+    background: var(--rdp-elevated);
     border: 1px solid var(--rdp-border);
     border-radius: var(--rdp-border-radius-lg);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-    padding: 6px;
+    box-shadow: var(--rdp-shadow-2);
+    padding: var(--rdp-space-1);
     z-index: 60;
     display: none;
     flex-direction: column;
     gap: 2px;
+    animation: rdp-pop-in var(--rdp-duration) var(--rdp-ease);
 }
-.rdp-route-pop.open { display: flex; }
-.rdp-route-item {
+.rdp-dock-pop.open { display: flex; }
+
+/* Anchor the dock list to whichever edge the HUD currently sits on. */
+.rdp-container[data-hud-dock="top"] .rdp-dock-pop { top: calc(100% + var(--rdp-space-2)); left: 0; }
+.rdp-container[data-hud-dock="bottom"] .rdp-dock-pop { bottom: calc(100% + var(--rdp-space-2)); left: 0; }
+.rdp-container[data-hud-dock="left"] .rdp-dock-pop { left: calc(100% + var(--rdp-space-2)); top: 0; }
+.rdp-container[data-hud-dock="right"] .rdp-dock-pop { right: calc(100% + var(--rdp-space-2)); top: 0; }
+
+.rdp-dock-item {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--rdp-space-2);
     width: 100%;
+    padding: var(--rdp-space-2);
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
+    border-radius: var(--rdp-border-radius);
     color: var(--rdp-text);
     font-size: var(--rdp-font-size-small);
     font-family: inherit;
-    padding: 7px 9px;
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--rdp-duration-fast) var(--rdp-ease),
+                border-color var(--rdp-duration-fast) var(--rdp-ease);
+}
+.rdp-dock-item:hover { background: var(--rdp-btn-hover); }
+.rdp-dock-item.active {
+    border-color: color-mix(in srgb, var(--rdp-accent) 55%, transparent);
+    background: color-mix(in srgb, var(--rdp-accent) 10%, transparent);
+}
+.rdp-dock-item svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--rdp-text-muted); }
+.rdp-dock-item.active svg { color: var(--rdp-accent); }
+
+/* -------------------------------------------------- Route picker */
+.rdp-route-pop {
+    position: absolute;
+    top: calc(100% + var(--rdp-space-2));
+    left: 0;
+    min-width: 268px;
+    max-width: 100%;
+    background: var(--rdp-elevated);
+    border: 1px solid var(--rdp-border);
+    border-radius: var(--rdp-border-radius-lg);
+    box-shadow: var(--rdp-shadow-2);
+    padding: var(--rdp-space-1);
+    z-index: 60;
+    display: none;
+    flex-direction: column;
+    gap: 2px;
+    animation: rdp-pop-in var(--rdp-duration) var(--rdp-ease);
+}
+.rdp-route-pop.open { display: flex; }
+
+/* On vertical rails the route list must open sideways. */
+.rdp-container[data-hud-dock="left"] .rdp-route-pop {
+    top: 0;
+    left: calc(100% + var(--rdp-space-2));
+}
+.rdp-container[data-hud-dock="right"] .rdp-route-pop {
+    top: 0;
+    left: auto;
+    right: calc(100% + var(--rdp-space-2));
+}
+.rdp-container[data-hud-dock="bottom"] .rdp-route-pop {
+    top: auto;
+    bottom: calc(100% + var(--rdp-space-2));
+}
+
+.rdp-route-head {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--rdp-text-muted);
+    padding: var(--rdp-space-2) var(--rdp-space-2) var(--rdp-space-1);
+}
+
+.rdp-route-item {
+    display: flex;
+    align-items: center;
+    gap: var(--rdp-space-2);
+    width: 100%;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--rdp-text);
+    font-size: var(--rdp-font-size-small);
+    font-family: inherit;
+    padding: var(--rdp-space-2);
     border-radius: var(--rdp-border-radius);
     cursor: pointer;
     text-align: left;
+    transition: background var(--rdp-duration-fast) var(--rdp-ease),
+                border-color var(--rdp-duration-fast) var(--rdp-ease);
 }
 .rdp-route-item:hover:not(:disabled) { background: var(--rdp-btn-hover); }
 .rdp-route-item:disabled { opacity: 0.4; cursor: not-allowed; }
-.rdp-route-item.active { outline: 1px solid var(--rdp-accent); }
-.rdp-route-name { font-weight: 600; min-width: 52px; }
-.rdp-route-meta { color: var(--rdp-text-muted); font-size: 0.78rem; }
-.rdp-route-check { margin-left: auto; color: var(--rdp-success); }
-.rdp-route-head {
-    font-size: 0.75rem;
-    color: var(--rdp-text-muted);
-    padding: 4px 9px 2px;
+.rdp-route-item.active {
+    border-color: color-mix(in srgb, var(--rdp-accent) 55%, transparent);
+    background: color-mix(in srgb, var(--rdp-accent) 10%, transparent);
 }
+.rdp-route-name {
+    font-family: var(--rdp-font-mono);
+    font-weight: 600;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    min-width: 62px;
+}
+.rdp-route-meta {
+    color: var(--rdp-text-muted);
+    font-size: 0.76rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.rdp-route-check { margin-left: auto; color: var(--rdp-accent); font-size: 0.6rem; }
 
-/* Modal */
+/* -------------------------------------------------- Modal */
 .rdp-modal {
     display: none;
     position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.7);
+    inset: 0;
+    z-index: 300;
+    padding: var(--rdp-space-4);
+    background: var(--rdp-scrim);
+    backdrop-filter: blur(3px);
     justify-content: center;
     align-items: center;
-    z-index: 10;
 }
 
 .rdp-modal.active { display: flex; }
 
 .rdp-modal-content {
+    width: min(400px, 100%);
+    max-height: 100%;
+    overflow-y: auto;
+    padding: var(--rdp-space-5);
     background: var(--rdp-surface);
-    padding: 24px;
+    border: 1px solid var(--rdp-border);
     border-radius: var(--rdp-border-radius-lg);
-    max-width: 360px;
-    width: 90%;
+    box-shadow: var(--rdp-shadow-3);
+    animation: rdp-modal-in var(--rdp-duration) var(--rdp-ease);
+}
+
+@keyframes rdp-modal-in {
+    from { opacity: 0; transform: translateY(8px) scale(0.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .rdp-modal-content h2 {
-    margin-bottom: 16px;
-    font-size: 1.1rem;
+    margin-bottom: var(--rdp-space-4);
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
 }
 
-.rdp-form-group {
-    margin-bottom: 12px;
+/* Small caption under the title, injected by CSS to avoid template churn */
+.rdp-modal-content h2::after {
+    content: 'Credentials are sent over the RDP session and stored locally only if you choose to remember them.';
+    display: block;
+    margin-top: var(--rdp-space-1);
+    font-size: 0.76rem;
+    font-weight: 400;
+    line-height: 1.4;
+    color: var(--rdp-text-muted);
+    letter-spacing: 0;
 }
+
+.rdp-form-group { margin-bottom: var(--rdp-space-3); }
 
 .rdp-form-group label {
     display: block;
-    margin-bottom: 4px;
-    font-size: 0.85rem;
+    margin-bottom: var(--rdp-space-1);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--rdp-text-muted);
 }
 
 .rdp-form-group input {
     width: 100%;
-    padding: 8px;
+    height: var(--rdp-control-height);
+    padding: 0 var(--rdp-space-3);
     border: 1px solid var(--rdp-input-border);
     border-radius: var(--rdp-border-radius);
     background: var(--rdp-input-bg);
     color: var(--rdp-text);
     font-size: var(--rdp-font-size-small);
     font-family: inherit;
+    transition: border-color var(--rdp-duration-fast) var(--rdp-ease),
+                box-shadow var(--rdp-duration-fast) var(--rdp-ease);
 }
+
+.rdp-form-group input::placeholder { color: var(--rdp-text-muted); opacity: 0.65; }
 
 .rdp-form-group input:focus {
     outline: none;
     border-color: var(--rdp-input-focus-border);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--rdp-accent) 20%, transparent);
 }
 
+.rdp-form-checkbox { margin-top: var(--rdp-space-1); }
 .rdp-form-checkbox label {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--rdp-space-2);
+    margin: 0;
+    font-size: var(--rdp-font-size-small);
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--rdp-text-muted);
     cursor: pointer;
 }
-
 .rdp-form-checkbox input[type="checkbox"] {
-    width: auto;
+    width: 15px;
+    height: 15px;
+    accent-color: var(--rdp-accent);
     cursor: pointer;
 }
 
 .rdp-modal-error {
     display: none;
-    margin-bottom: 12px;
-    padding: 8px 10px;
-    border: 1px solid var(--rdp-error, #e5484d);
+    margin-bottom: var(--rdp-space-3);
+    padding: var(--rdp-space-2) var(--rdp-space-3);
+    border: 1px solid color-mix(in srgb, var(--rdp-error) 50%, transparent);
+    border-left-width: 3px;
     border-radius: var(--rdp-border-radius);
-    background: color-mix(in srgb, var(--rdp-error, #e5484d) 12%, transparent);
-    color: var(--rdp-error, #e5484d);
+    background: color-mix(in srgb, var(--rdp-error) 12%, transparent);
+    color: var(--rdp-error);
     font-size: var(--rdp-font-size-small);
-    line-height: 1.35;
+    line-height: 1.4;
     word-break: break-word;
 }
 
@@ -583,25 +1217,33 @@ const STYLES = `
 
 .rdp-modal-buttons {
     display: flex;
-    gap: 8px;
-    margin-top: 16px;
+    gap: var(--rdp-space-2);
+    margin-top: var(--rdp-space-5);
 }
 
-.rdp-modal-buttons .rdp-btn { flex: 1; }
-.rdp-modal-buttons .rdp-btn-primary { background: var(--rdp-accent); color: var(--rdp-accent-text); }
-.rdp-modal-buttons .rdp-btn-primary:hover { opacity: 0.9; }
+.rdp-modal-buttons .rdp-btn { flex: 1; height: 38px; }
 
-/* Virtual Keyboard Overlay */
+.rdp-modal-buttons .rdp-btn-primary {
+    background: var(--rdp-accent);
+    color: var(--rdp-accent-text);
+    border-color: transparent;
+    font-weight: 600;
+}
+.rdp-modal-buttons .rdp-btn-primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--rdp-accent) 88%, #ffffff 12%);
+}
+
+/* -------------------------------------------------- Virtual keyboard */
 .rdp-keyboard-overlay {
     display: none;
     position: absolute;
-    background: color-mix(in srgb, var(--rdp-surface) 95%, transparent);
-    border: 2px solid var(--rdp-border);
+    padding: var(--rdp-space-2);
+    background: color-mix(in srgb, var(--rdp-surface) 96%, transparent);
+    border: 1px solid var(--rdp-border);
     border-radius: var(--rdp-border-radius-lg);
-    padding: 8px;
+    box-shadow: var(--rdp-shadow-3);
     z-index: 100;
     user-select: none;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
     overflow: hidden;
 }
 
@@ -611,85 +1253,121 @@ const STYLES = `
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 4px 8px;
-    margin-bottom: 8px;
-    background: var(--rdp-surface);
+    padding: 0 var(--rdp-space-1) 0 var(--rdp-space-2);
+    margin-bottom: var(--rdp-space-2);
+    height: 26px;
     border-radius: var(--rdp-border-radius);
+    background: color-mix(in srgb, var(--rdp-text) 4%, transparent);
     cursor: move;
 }
 
 .rdp-keyboard-title {
-    font-size: 0.8rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
     color: var(--rdp-text-muted);
 }
 
 .rdp-keyboard-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
     background: transparent;
     border: none;
+    border-radius: var(--rdp-border-radius);
     color: var(--rdp-text-muted);
-    font-size: 1.2rem;
-    cursor: pointer;
-    padding: 2px 6px;
+    font-size: 1.05rem;
     line-height: 1;
+    cursor: pointer;
+    transition: background var(--rdp-duration-fast) var(--rdp-ease),
+                color var(--rdp-duration-fast) var(--rdp-ease);
+}
+.rdp-keyboard-close:hover {
+    background: color-mix(in srgb, var(--rdp-error) 18%, transparent);
+    color: var(--rdp-error);
 }
 
-.rdp-keyboard-close:hover { color: var(--rdp-error); }
-
-.rdp-keyboard-content {
-    transform-origin: top left;
-    width: max-content;
-}
+.rdp-keyboard-content { transform-origin: top left; width: max-content; }
 
 .rdp-keyboard-rows {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: var(--rdp-space-1);
 }
 
 .rdp-keyboard-row {
     display: flex;
-    gap: 4px;
+    gap: var(--rdp-space-1);
     justify-content: center;
 }
 
 .rdp-key {
-    background: var(--rdp-btn-bg);
-    border: 1px solid var(--rdp-border);
-    color: var(--rdp-btn-text);
-    padding: 8px 12px;
-    min-width: 36px;
-    height: 36px;
-    border-radius: var(--rdp-border-radius);
-    cursor: pointer;
-    font-size: 0.75rem;
-    font-family: inherit;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.1s, transform 0.05s, color 0.1s;
+    min-width: 34px;
+    height: 34px;
+    padding: 0 var(--rdp-space-2);
+    background: var(--rdp-btn-bg);
+    border: 1px solid var(--rdp-border);
+    border-bottom-width: 2px;
+    border-radius: var(--rdp-border-radius);
+    color: var(--rdp-btn-text);
+    font-size: 0.74rem;
+    font-family: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background var(--rdp-duration-fast) var(--rdp-ease),
+                border-color var(--rdp-duration-fast) var(--rdp-ease),
+                transform var(--rdp-duration-fast) var(--rdp-ease);
 }
 
 .rdp-key:hover { background: var(--rdp-btn-hover); }
-.rdp-key:active { transform: scale(0.95); background: var(--rdp-btn-active-bg); color: var(--rdp-btn-active-text); }
-.rdp-key.pressed { background: var(--rdp-btn-active-bg); color: var(--rdp-btn-active-text); }
 
-.rdp-key-wide { min-width: 60px; }
-.rdp-key-wider { min-width: 80px; }
-.rdp-key-widest { min-width: 100px; }
+.rdp-key:active,
+.rdp-key.pressed {
+    background: var(--rdp-accent);
+    border-color: var(--rdp-accent);
+    color: var(--rdp-accent-text);
+    transform: translateY(1px);
+    border-bottom-width: 1px;
+}
+
+.rdp-key-wide { min-width: 58px; }
+.rdp-key-wider { min-width: 78px; }
+.rdp-key-widest { min-width: 98px; }
 .rdp-key-space { min-width: 200px; }
-.rdp-key-special { background: color-mix(in srgb, var(--rdp-btn-bg) 80%, var(--rdp-accent) 20%); }
-.rdp-key-special:hover { background: color-mix(in srgb, var(--rdp-btn-hover) 80%, var(--rdp-accent) 20%); }
+
+/* Modifiers read as a different key class than letters */
+.rdp-key-modifier {
+    background: color-mix(in srgb, var(--rdp-btn-bg) 60%, var(--rdp-border) 40%);
+    color: var(--rdp-text-muted);
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+}
+.rdp-key-modifier:hover { color: var(--rdp-text); }
+
+.rdp-key-special {
+    background: color-mix(in srgb, var(--rdp-accent) 14%, var(--rdp-btn-bg));
+    border-color: color-mix(in srgb, var(--rdp-accent) 35%, transparent);
+    color: var(--rdp-accent);
+}
+.rdp-key-special:hover {
+    background: color-mix(in srgb, var(--rdp-accent) 24%, var(--rdp-btn-bg));
+}
 
 .rdp-keyboard-resize {
     position: absolute;
-    bottom: 4px;
-    right: 4px;
+    bottom: 2px;
+    right: 2px;
     width: 16px;
     height: 16px;
     cursor: nwse-resize;
-    opacity: 0.5;
+    opacity: 0.45;
 }
-
 .rdp-keyboard-resize:hover { opacity: 1; }
 
 .rdp-keyboard-resize::before,
@@ -699,7 +1377,6 @@ const STYLES = `
     background: var(--rdp-text-muted);
     border-radius: 1px;
 }
-
 .rdp-keyboard-resize::before {
     width: 12px;
     height: 2px;
@@ -708,7 +1385,6 @@ const STYLES = `
     transform: rotate(-45deg);
     transform-origin: right bottom;
 }
-
 .rdp-keyboard-resize::after {
     width: 8px;
     height: 2px;
@@ -723,26 +1399,72 @@ const STYLES = `
 // HTML TEMPLATE
 // ============================================================
 const TEMPLATE = `
-<div class="rdp-container">
-    <div class="rdp-topbar">
-        <div class="rdp-status">
-            <div class="rdp-status-dot"></div>
-            <span class="rdp-status-text">Disconnected</span>
-        </div>
-        <div class="rdp-controls">
-            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-connect" data-collapse-priority="1">Connect</button>
-            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-disconnect" data-collapse-priority="2" disabled>Disconnect</button>
-            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-reconnect" data-collapse-priority="3" title="Auto reconnect on disconnect">Reconnect: Off</button>
-            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-keyboard" data-collapse-priority="never" disabled title="Toggle Virtual Keyboard">⌨️</button>
-            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-mute" data-collapse-priority="never" disabled title="Toggle Audio">🔊</button>
-            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-screenshot" data-collapse-priority="never" disabled title="Take Screenshot">📷</button>
-            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-clipboard" data-collapse-priority="never" disabled title="Push local clipboard to remote">📋</button>
-            <button class="rdp-btn rdp-btn-no-wrap rdp-btn-fullscreen" data-collapse-priority="never">⛶</button>
-            <div class="rdp-overflow-container">
-                <button class="rdp-btn rdp-btn-overflow" title="More options">▼</button>
-                <div class="rdp-overflow-dropdown"></div>
+<div class="rdp-container" data-hud-dock="top">
+    <!-- Slim grip: the only way to bring the HUD back, so casual mouse
+         movement in the remote desktop never pops it open by accident. -->
+    <button class="rdp-hud-handle" type="button" title="Show controls" aria-label="Show controls" aria-expanded="true"></button>
+
+    <div class="rdp-hud">
+        <div class="rdp-topbar">
+            <button type="button" class="rdp-status" data-state="disconnected" title="Disconnected — click to connect" aria-label="Disconnected. Click to connect.">
+                <span class="rdp-status-icon" aria-hidden="true">
+                    <svg class="rdp-status-glyph rdp-glyph-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v9"/><path d="M6.34 6.34a8 8 0 1 0 11.32 0"/></svg>
+                    <svg class="rdp-status-glyph rdp-glyph-on" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="m7.8 12.2 2.9 2.9 5.5-5.6" fill="none" stroke="var(--rdp-surface)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <svg class="rdp-status-glyph rdp-glyph-error" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
+                </span>
+            </button>
+            <span class="rdp-status-text rdp-sr-only" role="status" aria-live="polite">Disconnected</span>
+            <div class="rdp-controls">
+                <button class="rdp-btn rdp-btn-icon rdp-btn-disconnect" data-collapse-priority="2" disabled title="Disconnect" aria-label="Disconnect">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v9"/><path d="M6.34 6.34a8 8 0 1 0 11.32 0"/><path d="m3 3 18 18"/></svg>
+                </button>
+                <button class="rdp-btn rdp-btn-icon rdp-btn-reconnect" data-collapse-priority="3" title="Auto reconnect: off" aria-label="Toggle auto reconnect" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg>
+                </button>
+                <button class="rdp-btn rdp-btn-icon rdp-btn-keyboard" data-collapse-priority="never" disabled title="Toggle virtual keyboard" aria-label="Toggle virtual keyboard" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6"/></svg>
+                </button>
+                <button class="rdp-btn rdp-btn-icon rdp-btn-mute" data-collapse-priority="never" disabled title="Toggle audio" aria-label="Toggle audio" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6.5 9H3v6h3.5L11 19V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 6a9 9 0 0 1 0 12"/></svg>
+                </button>
+                <button class="rdp-btn rdp-btn-icon rdp-btn-screenshot" data-collapse-priority="never" disabled title="Take screenshot" aria-label="Take screenshot">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5A2.5 2.5 0 0 1 5.5 6h1.2l.9-1.4A1.5 1.5 0 0 1 8.9 4h6.2a1.5 1.5 0 0 1 1.3.6L17.3 6h1.2A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-8Z"/><circle cx="12" cy="12.5" r="3.2"/></svg>
+                </button>
+                <button class="rdp-btn rdp-btn-icon rdp-btn-clipboard" data-collapse-priority="never" disabled title="Push local clipboard to remote" aria-label="Push local clipboard to remote">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><path d="M12 11v6M9.5 14.5 12 17l2.5-2.5"/></svg>
+                </button>
+                <button class="rdp-btn rdp-btn-icon rdp-btn-fullscreen" data-collapse-priority="never" title="Toggle fullscreen" aria-label="Enter fullscreen" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 9V5a1 1 0 0 1 1-1h4M20 9V5a1 1 0 0 0-1-1h-4M4 15v4a1 1 0 0 0 1 1h4M20 15v4a1 1 0 0 1-1 1h-4"/></svg>
+                </button>
+                <button class="rdp-btn rdp-btn-icon rdp-btn-pin" data-collapse-priority="never" title="Keep controls visible" aria-label="Keep controls visible" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6M12 4v6l3 3v4H9v-4l3-3V4M12 17v3"/></svg>
+                </button>
+                <button class="rdp-btn rdp-btn-icon rdp-btn-dock" data-collapse-priority="never" title="Move controls (top)" aria-label="Change dock position" aria-haspopup="menu" aria-expanded="false">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18"/><path d="M9 3v6"/></svg>
+                </button>
+                <button class="rdp-btn rdp-btn-icon rdp-btn-theme" data-collapse-priority="never" title="Switch to light theme" aria-label="Switch theme" aria-pressed="false">
+                    <svg class="rdp-theme-glyph rdp-glyph-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+                    <svg class="rdp-theme-glyph rdp-glyph-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+                </button>
+                <div class="rdp-overflow-container">
+                    <button class="rdp-btn rdp-btn-icon rdp-btn-overflow" title="More options" aria-label="More options" aria-haspopup="true" aria-expanded="false">
+                        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+                    </button>
+                    <div class="rdp-overflow-dropdown" role="menu"></div>
+                </div>
             </div>
         </div>
+
+        <div class="rdp-bottombar">
+            <span class="rdp-metric rdp-latency" title="Round-trip time">
+                <svg class="rdp-metric-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20V4"/><path d="m6 10 6-6 6 6"/></svg>
+                <span class="rdp-metric-value">--</span>
+            </span>
+            <span class="rdp-transport rdp-transport-ws" title="Media over WebSocket relay" role="button" tabindex="0" aria-haspopup="true" aria-expanded="false"><span class="rdp-transport-dot"></span><span class="rdp-transport-text">RELAY</span></span>
+        </div>
+
+        <div class="rdp-route-pop"></div>
+        <div class="rdp-dock-pop" role="menu" aria-label="Dock position"></div>
     </div>
 
     <div class="rdp-screen-wrapper">
@@ -750,7 +1472,7 @@ const TEMPLATE = `
             <div class="rdp-loading idle">
                 <div class="rdp-spinner"></div>
                 <div class="rdp-plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></div>
-                <p>Click Connect to start</p>
+                <p>Click to connect</p>
             </div>
             <textarea class="rdp-ime" aria-hidden="true" tabindex="0" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
             <canvas class="rdp-canvas" width="1280" height="720" style="display: none;"></canvas>
@@ -878,37 +1600,28 @@ const TEMPLATE = `
         </div>
     </div>
 
-    <div class="rdp-bottombar">
-        <span class="rdp-resolution">Resolution: --</span>
-        <span class="rdp-bottombar-right">
-            <span class="rdp-transport rdp-transport-ws" title="Media over WebSocket relay"><span class="rdp-transport-dot"></span><span class="rdp-transport-text">RELAY</span></span>
-            <span class="rdp-latency">Latency: --</span>
-        </span>
-    </div>
-    <div class="rdp-route-pop"></div>
-
     <div class="rdp-modal">
-        <div class="rdp-modal-content">
-            <h2>Connect to Remote Desktop</h2>
-            <div class="rdp-modal-error"></div>
+        <div class="rdp-modal-content" role="dialog" aria-modal="true" aria-labelledby="rdp-modal-title">
+            <h2 id="rdp-modal-title">Connect to Remote Desktop</h2>
+            <div class="rdp-modal-error" role="alert"></div>
             <div class="rdp-form-group">
-                <label>Host</label>
-                <input type="text" class="rdp-input-host" placeholder="192.168.1.100">
+                <label for="rdp-input-host">Host</label>
+                <input id="rdp-input-host" type="text" class="rdp-input-host" placeholder="192.168.1.100" autocomplete="off">
             </div>
             <div class="rdp-form-group">
-                <label>Port</label>
-                <input type="number" class="rdp-input-port" value="3389">
+                <label for="rdp-input-port">Port</label>
+                <input id="rdp-input-port" type="number" class="rdp-input-port" value="3389" min="1" max="65535">
             </div>
             <div class="rdp-form-group">
-                <label>Username</label>
-                <input type="text" class="rdp-input-user" placeholder="Administrator">
+                <label for="rdp-input-user">Username</label>
+                <input id="rdp-input-user" type="text" class="rdp-input-user" placeholder="Administrator" autocomplete="username">
             </div>
             <div class="rdp-form-group">
-                <label>Password</label>
-                <input type="password" class="rdp-input-pass" placeholder="Password">
+                <label for="rdp-input-pass">Password</label>
+                <input id="rdp-input-pass" type="password" class="rdp-input-pass" placeholder="Password" autocomplete="current-password">
             </div>
             <div class="rdp-form-group rdp-form-checkbox">
-                <label><input type="checkbox" class="rdp-input-remember" checked> Remember</label>
+                <label for="rdp-input-remember"><input id="rdp-input-remember" type="checkbox" class="rdp-input-remember" checked> Remember</label>
             </div>
             <div class="rdp-modal-buttons">
                 <button class="rdp-btn rdp-btn-primary rdp-modal-connect">Connect</button>
@@ -955,6 +1668,10 @@ export class RDPClient {
      * @param {number} [options.reconnectMaxAttempts=3] - Max auto reconnect attempts
      * @param {boolean} [options.autoReconnect=false] - Auto reconnect on disconnect
      * @param {boolean} [options.keepConnectionModalOpen=false] - Keep connection modal open when disconnected (cannot be closed)
+     * @param {boolean} [options.autoHideChrome=true] - Fold the floating HUD away while a session is in use
+     * @param {number} [options.chromeHideDelayMs=2600] - Idle delay (ms) before the HUD folds away
+     * @param {boolean} [options.keepChromeVisible=false] - Start with the HUD pinned open
+     * @param {'top'|'right'|'bottom'|'left'} [options.hudDock='top'] - Edge the floating HUD docks to
      * @param {boolean} [options.loadingSpinnerOpensModal=true] - Whether clicking the loading area opens the connection modal
      * @param {number} [options.minWidth=0] - Minimum canvas width in pixels (0 = no minimum, scrollbar appears if container is smaller)
      * @param {number} [options.minHeight=0] - Minimum canvas height in pixels (0 = no minimum, scrollbar appears if container is smaller)
@@ -962,11 +1679,11 @@ export class RDPClient {
      * @param {import('./rdp-themes.js').RDPTheme} [options.theme] - Theme configuration
      * @param {import('./rdp-security.js').SecurityPolicy} [options.securityPolicy] - Security policy for connection restrictions
      * @param {Object} [options.visibleTopBarButtons] - Control visibility of top bar buttons
-     * @param {boolean} [options.visibleTopBarButtons.connect=true] - Show Connect button
+     * @param {boolean} [options.visibleTopBarButtons.connect=true] - Deprecated: the status icon is the connect affordance
      * @param {boolean} [options.visibleTopBarButtons.disconnect=true] - Show Disconnect button
      * @param {boolean} [options.visibleTopBarButtons.keyboard=true] - Show Keyboard button
      * @param {boolean} [options.visibleTopBarButtons.mute=true] - Show Mute button
-     * @param {boolean} [options.visibleTopBarButtons.screenshot=true] - Show Screenshot button
+     * @param {boolean} [options.visibleTopBarButtons.screenshot=false] - Show Screenshot button (hidden by default)
      * @param {boolean} [options.visibleTopBarButtons.clipboard=true] - Show Clipboard button
      * @param {boolean} [options.visibleTopBarButtons.fullscreen=true] - Show Fullscreen button
      * @param {Array<{name: string, click: function}>} [options.additionalTopBarButtons=[]] - Custom buttons (max 10) added before built-in controls. Buttons collapse into overflow menu when space is limited.
@@ -984,16 +1701,21 @@ export class RDPClient {
             maxPixelRatio: 2,   // Cap on devicePixelRatio used for 1:1 physical-pixel resolution (keeps 4K/retina frames sane)
             keepConnectionModalOpen: false,
             loadingSpinnerOpensModal: true,
+            autoHideChrome: true,          // Fold the HUD away while a live session is in use
+            chromeHideDelayMs: 2600,       // Idle delay before the floating HUD hides
+            keepChromeVisible: false,      // Start with the HUD pinned open
+            hudDock: 'top',                // HUD edge: 'top' | 'right' | 'bottom' | 'left'
             minWidth: 0,    // Minimum canvas width (0 = no minimum, scrollbar appears if container is smaller)
             minHeight: 0,   // Minimum canvas height (0 = no minimum, scrollbar appears if container is smaller)
             theme: null,
+            themeMode: null,               // 'dark' | 'light' | 'auto' (defaults to the theme preset)
             visibleTopBarButtons: {
                 connect: true,
                 disconnect: true,
                 reconnect: true,
                 keyboard: true,
                 mute: true,
-                screenshot: true,
+                screenshot: false,   // hidden by default; screenshots are available via the API
                 clipboard: true,
                 fullscreen: true,
                 ...visibleTopBarButtons
@@ -1014,14 +1736,26 @@ export class RDPClient {
 
         this._container = container;
         this._initShadowDOM();
+        // Resolve an auto theme mode before first paint so the page never
+        // flashes the wrong palette.
+        if (this.options.themeMode === 'auto') {
+            const mode = this._prefersLight() ? 'light' : 'dark';
+            this.options.theme = { ...(this.options.theme || {}), preset: mode, mode };
+        } else if (this.options.themeMode === 'light' || this.options.themeMode === 'dark') {
+            this.options.theme = { ...(this.options.theme || {}), preset: this.options.themeMode, mode: this.options.themeMode };
+        }
         this._applyTheme(this.options.theme);
         this._applyMinDimensions();  // Apply min dimension CSS vars
         this._initState();
         this._bindElements();
+        // Re-apply so the theme mode reaches the container/button that only
+        // exist after _bindElements (the first _applyTheme had no DOM refs).
+        this._applyTheme(this.options.theme || { preset: 'dark' });
         this._initResponsiveToolbar();  // Setup responsive overflow handling
         this._setupEventListeners();
         this._restoreRememberedConnection();
         this._setupFullscreenAutohide();
+        this._setupChromeAutohide();
         
         // Auto-show modal on init when keepConnectionModalOpen is enabled
         if (this.options.keepConnectionModalOpen) {
@@ -1061,6 +1795,11 @@ export class RDPClient {
         if (!this.options.showBottomBar) {
             this._shadow.querySelector('.rdp-bottombar').classList.add('hidden');
         }
+        // An entirely empty HUD (both rows hidden) should not float over the screen.
+        if (!this.options.showTopBar && !this.options.showBottomBar) {
+            this._shadow.querySelector('.rdp-hud').classList.add('hidden');
+            this._shadow.querySelector('.rdp-hud-handle').classList.add('hidden');
+        }
     }
     
     /**
@@ -1081,6 +1820,20 @@ export class RDPClient {
         
         // Apply as :host styles with optional font imports
         this._themeStyle.textContent = `${fontCss}\n:host { ${cssVars}; }`;
+
+        // Track the resolved mode so the theme toggle can swap icons and the
+        // stylesheet can apply light-specific corrections.
+        const mode = resolved.mode || 'dark';
+        this._themeMode = mode;
+        const container = this._el?.container;
+        if (container) container.dataset.themeMode = mode;
+        const btn = this._el?.btnTheme;
+        if (btn) {
+            const next = mode === 'light' ? 'dark' : 'light';
+            btn.title = `Switch to ${next} theme`;
+            btn.setAttribute('aria-label', btn.title);
+            btn.setAttribute('aria-pressed', String(mode === 'light'));
+        }
     }
     
     /**
@@ -1093,6 +1846,47 @@ export class RDPClient {
     setTheme(themeConfig) {
         this.options.theme = themeConfig;
         this._applyTheme(themeConfig);
+    }
+
+    /** @public @returns {'dark'|'light'} The theme mode currently in effect. */
+    getThemeMode() {
+        return this._themeMode || 'dark';
+    }
+
+    /**
+     * Switch between the light and dark presets.
+     *
+     * Only the mode is changed: any explicit colour overrides in the original
+     * theme config are preserved, so a brand accent survives a mode switch.
+     *
+     * @public
+     * @param {'dark'|'light'|'auto'} mode - 'auto' follows prefers-color-scheme
+     * @returns {'dark'|'light'} The resolved mode
+     */
+    setThemeMode(mode) {
+        let target = mode;
+        if (target === 'auto' || target == null) target = this._prefersLight() ? 'light' : 'dark';
+        if (target !== 'light' && target !== 'dark') target = 'dark';
+
+        const base = this.options.theme || {};
+        // Keep user colour/typography/shape overrides, swap only the preset.
+        const next = { ...base, preset: target, mode: target };
+        this.options.theme = next;
+        this.options.themeMode = mode === 'auto' ? 'auto' : target;
+        this._applyTheme(next);
+        return target;
+    }
+
+    /** @public Toggle light/dark and return the new mode. */
+    toggleThemeMode() {
+        return this.setThemeMode(this.getThemeMode() === 'light' ? 'dark' : 'light');
+    }
+
+    /** True when the OS asks for a light colour scheme. */
+    _prefersLight() {
+        try {
+            return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
+        } catch { return false; }
     }
     
     /**
@@ -1256,6 +2050,13 @@ export class RDPClient {
         // Physical keys currently held down on the remote, keyed by KeyboardEvent.code.
         // Used to guarantee a matching key-up is always delivered (see _releaseAllKeys).
         this._pressedKeys = new Map();
+
+        // Floating chrome auto-hide state (see _setupChromeAutohide).
+        this._chromeHidden = false;
+        this._chromePinned = false;
+        this._chromeHideTimer = null;
+        this._dockPopOpen = false;
+        this._hudDock = 'top';
         this._releaseAllKeysHandler = () => this._releaseAllKeys();
     }
 
@@ -1264,15 +2065,23 @@ export class RDPClient {
         
         this._el = {
             container: $('.rdp-container'),
+            hud: $('.rdp-hud'),
+            hudHandle: $('.rdp-hud-handle'),
+            btnPin: $('.rdp-btn-pin'),
+            btnDock: $('.rdp-btn-dock'),
+            dockPop: $('.rdp-dock-pop'),
+            topbar: $('.rdp-topbar'),
+            bottombar: $('.rdp-bottombar'),
             screen: $('.rdp-screen'),
             canvas: $('.rdp-canvas'),
             toast: $('.rdp-toast'),
             loading: $('.rdp-loading'),
             ime: $('.rdp-ime'),
-            statusDot: $('.rdp-status-dot'),
+            statusDot: $('.rdp-status-icon'),
+            status: $('.rdp-status'),
             statusText: $('.rdp-status-text'),
-            btnConnect: $('.rdp-btn-connect'),
             btnDisconnect: $('.rdp-btn-disconnect'),
+            btnTheme: $('.rdp-btn-theme'),
             btnReconnect: $('.rdp-btn-reconnect'),
             btnMute: $('.rdp-btn-mute'),
             btnScreenshot: $('.rdp-btn-screenshot'),
@@ -1287,7 +2096,6 @@ export class RDPClient {
             inputUser: $('.rdp-input-user'),
             inputPass: $('.rdp-input-pass'),
             inputRemember: $('.rdp-input-remember'),
-            resolution: $('.rdp-resolution'),
             latency: $('.rdp-latency'),
             transport: $('.rdp-transport'),
             transportText: $('.rdp-transport-text'),
@@ -1309,7 +2117,6 @@ export class RDPClient {
         
         // Apply button visibility based on visibleTopBarButtons option
         const btns = this.options.visibleTopBarButtons;
-        if (!btns.connect) this._el.btnConnect.style.display = 'none';
         if (!btns.disconnect) this._el.btnDisconnect.style.display = 'none';
         if (!btns.reconnect && this._el.btnReconnect) this._el.btnReconnect.style.display = 'none';
         if (!btns.keyboard) this._el.btnKeyboard.style.display = 'none';
@@ -1320,6 +2127,9 @@ export class RDPClient {
         
         // Create additional custom buttons at the start of controls
         this._createAdditionalButtons();
+
+        // Reflect the initial mute state in the SVG icon + aria-pressed.
+        this._updateMuteIcon();
         
         this._canvas = this._el.canvas;
         
@@ -1463,6 +2273,38 @@ export class RDPClient {
                 this._closeOverflowMenu();
             }
         });
+
+        // Keyboard: Esc closes the menu, arrows move between items.
+        this._shadow.addEventListener('keydown', (e) => {
+            if (!this._overflowMenuOpen) return;
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                this._closeOverflowMenu();
+                this._el.btnOverflow?.focus();
+                return;
+            }
+            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+            const items = Array.from(
+                this._el.overflowDropdown.querySelectorAll('.rdp-btn:not(:disabled)')
+            );
+            if (!items.length) return;
+            e.preventDefault();
+            const idx = items.indexOf(this._shadow.activeElement);
+            const next = e.key === 'ArrowDown'
+                ? (idx + 1) % items.length
+                : (idx <= 0 ? items.length - 1 : idx - 1);
+            items[next].focus();
+        });
+
+        // Move focus into the menu as soon as it opens so it is usable by keyboard.
+        this._el.btnOverflow?.addEventListener('click', () => {
+            if (!this._overflowMenuOpen) return;
+            requestAnimationFrame(() => {
+                this._el.overflowDropdown
+                    .querySelector('.rdp-btn:not(:disabled)')
+                    ?.focus();
+            });
+        });
         
         // Set up ResizeObserver on the topbar
         const topbar = this._shadow.querySelector('.rdp-topbar');
@@ -1499,86 +2341,98 @@ export class RDPClient {
     }
     
     /**
-     * Calculate if toolbar is overflowing and collapse/expand buttons accordingly
+     * Collapse lower-priority buttons into the overflow menu when the HUD would
+     * not fit. The panel is content-sized, so the budget comes from the
+     * container. When docked left/right the rails run vertically, so the
+     * measuring axis flips from width to height.
      * @private
      */
     _updateToolbarOverflow() {
         const controls = this._el.controls;
-        const topbar = this._shadow.querySelector('.rdp-topbar');
-        if (!controls || !topbar) return;
-        
+        const topbar = this._el.topbar;
+        const hud = this._el.hud;
+        if (!controls || !topbar || !hud) return;
+
+        const vertical = this._isHudVertical();
+        const container = this._el.container;
         const status = this._shadow.querySelector('.rdp-status');
-        const statusWidth = status ? status.offsetWidth : 0;
-        const topbarPadding = 32; // 16px padding on each side
-        const gap = 16; // gap between status and controls
-        const availableWidth = topbar.offsetWidth - statusWidth - topbarPadding - gap;
-        
+
+        // Budget along the stacking axis, minus panel padding, the status block
+        // and the gap that separates it from the controls.
+        const panelPadding = 16;
+        const gap = vertical ? 8 : 12;
+        const statusSize = status
+            ? (vertical ? status.offsetHeight : status.offsetWidth)
+            : 0;
+        const containerSize = vertical ? container.clientHeight : container.clientWidth;
+        const available = Math.max(0, (containerSize || 0) - (2 * panelPadding) - statusSize - gap - panelPadding);
+
         // Temporarily show all buttons to measure
         const wasCollapsed = new Set(this._collapsedButtons);
         for (const btn of wasCollapsed) {
             btn.classList.remove('rdp-collapsed');
         }
         this._el.btnOverflow.classList.remove('visible');
-        
-        // Measure controls width
-        let controlsWidth = controls.scrollWidth;
-        
-        // If controls fit, we're done
-        if (controlsWidth <= availableWidth) {
+
+        if (this._measureVisibleControlsSize() <= available) {
             this._collapsedButtons.clear();
             this._syncOverflowDropdown();
             return;
         }
-        
+
         // Need to collapse buttons - start with highest priority (first to collapse)
         this._collapsedButtons.clear();
-        const overflowBtnWidth = 40; // Approximate width of overflow button
-        
+        const overflowBtnSize = this._el.btnOverflow?.offsetHeight
+            || this._el.btnOverflow?.offsetWidth
+            || 34;
+
         for (const btn of this._collapsibleButtons) {
-            // Check if button is visible (not hidden by visibleTopBarButtons)
             if (btn.style.display === 'none') continue;
-            
-            // Check if we still need to collapse more
-            const currentWidth = this._measureVisibleControlsWidth();
-            if (currentWidth + (this._collapsedButtons.size > 0 ? overflowBtnWidth : 0) <= availableWidth) {
+
+            const current = this._measureVisibleControlsSize();
+            if (current + (this._collapsedButtons.size > 0 ? overflowBtnSize : 0) <= available) {
                 break;
             }
-            
-            // Collapse this button
+
             btn.classList.add('rdp-collapsed');
             this._collapsedButtons.add(btn);
         }
-        
+
         // Show overflow button if we have collapsed buttons
         this._syncOverflowDropdown();
     }
-    
+
+    /** True when the HUD is docked to a vertical edge (left/right). */
+    _isHudVertical() {
+        const dock = this._hudDock || 'top';
+        return dock === 'left' || dock === 'right';
+    }
+
     /**
-     * Measure the width of visible (non-collapsed) controls
-     * @returns {number} Width in pixels
+     * Measure the size of visible (non-collapsed) controls along the stacking
+     * axis: width for a horizontal HUD, height for a vertical one.
+     * @returns {number} Pixels
      * @private
      */
-    _measureVisibleControlsWidth() {
+    _measureVisibleControlsSize() {
         const controls = this._el.controls;
-        let width = 0;
-        const gap = 8; // CSS gap between buttons
+        if (!controls) return 0;
+        const vertical = this._isHudVertical();
+        let size = 0;
+        const gap = vertical ? 8 : 6;
         let visibleCount = 0;
-        
+
         for (const child of controls.children) {
             if (child.classList.contains('rdp-overflow-container')) continue;
             if (child.classList.contains('rdp-collapsed')) continue;
             if (child.style.display === 'none') continue;
-            
-            width += child.offsetWidth;
+
+            size += vertical ? child.offsetHeight : child.offsetWidth;
             visibleCount++;
         }
-        
-        // Add gaps between buttons
-        if (visibleCount > 1) {
-            width += (visibleCount - 1) * gap;
-        }
-        
-        return width;
+
+        if (visibleCount > 1) size += (visibleCount - 1) * gap;
+        return size;
     }
     
     /**
@@ -1606,18 +2460,29 @@ export class RDPClient {
         
         for (const originalBtn of sortedButtons) {
             const dropdownBtn = document.createElement('button');
-            dropdownBtn.className = 'rdp-btn';
-            dropdownBtn.textContent = originalBtn.textContent;
-            dropdownBtn.title = originalBtn.title || originalBtn.textContent;
+            dropdownBtn.className = 'rdp-btn rdp-btn-menu-item';
+            // Icon-only buttons have no text, so fall back to their label/title.
+            const label = originalBtn.getAttribute('aria-label') || originalBtn.title || originalBtn.textContent.trim();
+            const icon = originalBtn.querySelector('svg');
+            if (icon) {
+                const clone = icon.cloneNode(true);
+                clone.setAttribute('aria-hidden', 'true');
+                dropdownBtn.appendChild(clone);
+            }
+            const textSpan = document.createElement('span');
+            textSpan.textContent = label;
+            dropdownBtn.appendChild(textSpan);
+            dropdownBtn.title = originalBtn.title || label;
             dropdownBtn.disabled = originalBtn.disabled;
-            
+            dropdownBtn.setAttribute('role', 'menuitem');
+
             // Clone click behavior
             dropdownBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this._closeOverflowMenu();
                 originalBtn.click();
             });
-            
+
             dropdown.appendChild(dropdownBtn);
         }
     }
@@ -1641,8 +2506,10 @@ export class RDPClient {
     _openOverflowMenu() {
         this._el.overflowDropdown.classList.add('open');
         this._overflowMenuOpen = true;
+        this._el.btnOverflow?.setAttribute('aria-expanded', 'true');
+        this._showChrome(false);   // pin the toolbar while the menu is open
     }
-    
+
     /**
      * Close the overflow dropdown menu
      * @private
@@ -1650,6 +2517,8 @@ export class RDPClient {
     _closeOverflowMenu() {
         this._el.overflowDropdown.classList.remove('open');
         this._overflowMenuOpen = false;
+        this._el.btnOverflow?.setAttribute('aria-expanded', 'false');
+        this._scheduleChromeHide();
     }
     
     /**
@@ -1893,21 +2762,36 @@ export class RDPClient {
 
     _setupEventListeners() {
         // UI buttons
-        this._el.btnConnect.addEventListener('click', () => this._showModal());
+        // The status icon is the connect affordance: it opens the dialog when
+        // there is no live session, which removes the duplicate Connect button.
+        this._el.status?.addEventListener('click', () => {
+            if (this._isConnected || this._pendingConnect) return;
+            this._showModal();
+        });
         this._el.btnDisconnect.addEventListener('click', () => this.disconnect());
         if (this._el.btnReconnect) this._el.btnReconnect.addEventListener('click', () => this.setAutoReconnect(!this._autoReconnect));
         this._updateReconnectBtn();
+        this._el.btnTheme?.addEventListener('click', () => this.toggleThemeMode());
         this._el.btnMute.addEventListener('click', () => this._toggleMute());
         this._el.btnKeyboard.addEventListener('click', () => this._toggleKeyboard());
         this._el.btnScreenshot.addEventListener('click', () => this._handleScreenshotClick());
         this._el.btnClipboard.addEventListener('click', () => this.pushClipboard());
         this._el.btnFullscreen.addEventListener('click', () => this._toggleFullscreen());
         
-        // Loading area - click to open modal if not connected/connecting
+        // Loading area - click to open modal if not connected/connecting.
+        // Make it a real button so keyboard users can trigger it too.
         if (this.options.loadingSpinnerOpensModal) {
-            this._el.loading.addEventListener('click', () => {
-                if (!this._isConnected && !this._pendingConnect) {
-                    this._showModal();
+            this._el.loading.setAttribute('role', 'button');
+            this._el.loading.setAttribute('tabindex', '0');
+            this._el.loading.setAttribute('aria-label', 'Open connection dialog');
+            this._openModalIfIdle = () => {
+                if (!this._isConnected && !this._pendingConnect) this._showModal();
+            };
+            this._el.loading.addEventListener('click', this._openModalIfIdle);
+            this._el.loading.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    this._openModalIfIdle();
                 }
             });
             this._el.loading.style.cursor = 'pointer';
@@ -1919,6 +2803,17 @@ export class RDPClient {
         this._el.modal.addEventListener('click', (e) => {
             if (e.target === this._el.modal) this._hideModal();
         });
+        this._el.modal.addEventListener('keydown', (e) => this._handleModalKeyDown(e));
+        // Clear stale REQUIRED-field warnings as soon as the user edits a field.
+        // (Connection errors from the server are left alone until the next attempt.)
+        for (const input of [this._el.inputHost, this._el.inputPort, this._el.inputUser, this._el.inputPass]) {
+            input?.addEventListener('input', () => {
+                if (this._el.modalError?.dataset.kind === 'validation') {
+                    this._el.modalError.classList.remove('show');
+                    delete this._el.modalError.dataset.kind;
+                }
+            });
+        }
 
         // Canvas interactions
         this._canvas.setAttribute('tabindex', '0');
@@ -1977,12 +2872,29 @@ export class RDPClient {
             e.stopPropagation();
             this._toggleRoutePop();
         });
+        this._el.transport.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                this._toggleRoutePop();
+            }
+        });
         this._shadow.addEventListener('click', (e) => {
             if (this._el.routePop?.classList.contains('open')
                 && !e.composedPath().includes(this._el.routePop)
                 && !e.composedPath().includes(this._el.transport)) {
                 this._el.routePop.classList.remove('open');
+                this._el.transport?.setAttribute('aria-expanded', 'false');
             }
+        });
+        // Esc closes the route picker and returns focus to the badge.
+        this._shadow.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape') return;
+            if (!this._el.routePop?.classList.contains('open')) return;
+            e.preventDefault();
+            this._el.routePop.classList.remove('open');
+            this._el.transport?.setAttribute('aria-expanded', 'false');
+            this._el.transport?.focus();
         });
     }
 
@@ -2414,8 +3326,23 @@ export class RDPClient {
         if (this._audioWorklet) {
             this._audioWorklet.port.postMessage({ type: 'mute', data: { muted } });
         }
-        this._el.btnMute.textContent = muted ? '🔇' : '🔊';
+        this._updateMuteIcon();
         this._emit('mute', { muted });
+    }
+
+    /**
+     * Swap the mute button glyph between speaker and crossed-out speaker.
+     * Keeps a stable accessible label instead of an emoji.
+     */
+    _updateMuteIcon() {
+        const btn = this._el?.btnMute;
+        if (!btn) return;
+        btn.innerHTML = this._isMuted
+            ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6.5 9H3v6h3.5L11 19V5Z"/><path d="m16 9.5 5 5M21 9.5l-5 5"/></svg>`
+            : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6.5 9H3v6h3.5L11 19V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 6a9 9 0 0 1 0 12"/></svg>`;
+        btn.setAttribute('aria-label', this._isMuted ? 'Unmute audio' : 'Mute audio');
+        btn.title = this._isMuted ? 'Unmute audio' : 'Mute audio';
+        btn.setAttribute('aria-pressed', String(!!this._isMuted));
     }
 
     /**
@@ -2601,6 +3528,8 @@ export class RDPClient {
             }
         }
         clearTimeout(this._toastTimer);
+        clearTimeout(this._chromeHideTimer);
+        this._dockPopOpen = false;
         window.removeEventListener('blur', this._releaseAllKeysHandler);
         document.removeEventListener('visibilitychange', this._visibilityReleaseHandler);
         window.removeEventListener('pagehide', this._releaseAllKeysHandler);
@@ -2619,7 +3548,10 @@ export class RDPClient {
     }
 
     _showModal() {
+        // Remember what had focus so it can be restored on close.
+        this._preModalFocus = this._shadow.activeElement;
         this._el.modal.classList.add('active');
+        this._showChrome(false);   // never hide the toolbar behind a dialog
         // Hide cancel button when keepConnectionModalOpen is enabled
         this._el.modalCancel.style.display = this.options.keepConnectionModalOpen ? 'none' : '';
         // Show the last failure reason if there is one
@@ -2627,9 +3559,11 @@ export class RDPClient {
             if (this._lastError) {
                 this._el.modalError.textContent = this._lastError;
                 this._el.modalError.classList.add('show');
+                this._el.modalError.dataset.kind = 'connection';
             } else {
                 this._el.modalError.textContent = '';
                 this._el.modalError.classList.remove('show');
+                delete this._el.modalError.dataset.kind;
             }
         }
         // Prefill remembered connection
@@ -2642,7 +3576,60 @@ export class RDPClient {
         if (this.options.keepConnectionModalOpen && !this._isConnected) {
             return;
         }
+        const wasActive = this._el.modal.classList.contains('active');
         this._el.modal.classList.remove('active');
+        if (wasActive) this._scheduleChromeHide();
+        // Restore focus to whatever opened the dialog, so keyboard users are
+        // not dropped back at the top of the document.
+        if (wasActive) {
+            const prev = this._preModalFocus;
+            this._preModalFocus = null;
+            if (prev && typeof prev.focus === 'function' && prev.isConnected) {
+                try { prev.focus({ preventScroll: true }); } catch {}
+            } else {
+                try { this._el.status?.focus({ preventScroll: true }); } catch {}
+            }
+        }
+    }
+
+    /** True when the connection dialog is open. */
+    _isModalOpen() {
+        return !!this._el?.modal?.classList.contains('active');
+    }
+
+    /**
+     * Dialog keyboard behaviour: Esc closes it, Enter submits, and Tab is kept
+     * inside the dialog so focus cannot wander behind the scrim.
+     */
+    _handleModalKeyDown(e) {
+        if (!this._isModalOpen()) return;
+        if (e.key === 'Escape') {
+            if (this.options.keepConnectionModalOpen && !this._isConnected) return;
+            e.preventDefault();
+            this._hideModal();
+            return;
+        }
+        if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') {
+            e.preventDefault();
+            this._handleModalConnect();
+            return;
+        }
+        if (e.key === 'Tab') {
+            const focusable = this._el.modal.querySelectorAll(
+                'input:not([disabled]), button:not([disabled]):not([style*="display: none"])'
+            );
+            if (!focusable.length) return;
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            const active = this._shadow.activeElement;
+            if (e.shiftKey && active === first) {
+                e.preventDefault();
+                last.focus();
+            } else if (!e.shiftKey && active === last) {
+                e.preventDefault();
+                first.focus();
+            }
+        }
     }
 
     _handleModalConnect() {
@@ -2652,13 +3639,19 @@ export class RDPClient {
         const pass = this._el.inputPass.value;
 
         if (!host || !user) {
-            alert('Please enter host and username');
+            // Inline, announced feedback instead of a blocking alert()
+            if (this._el.modalError) {
+                this._el.modalError.textContent = 'Host and username are required';
+                this._el.modalError.classList.add('show');
+                this._el.modalError.dataset.kind = 'validation';
+            }
+            (host ? this._el.inputUser : this._el.inputHost).focus();
             return;
         }
 
         this._rememberConnection(host, port, user, pass);
         this._hideModal();
-        this.connect({ host, port, user, pass });
+        this.connect({ host, port, user, pass }).catch(() => {});
     }
 
     _rememberConnection(host, port, user, pass) {
@@ -2686,23 +3679,363 @@ export class RDPClient {
 
     _setupFullscreenAutohide() {
         this._lastFullscreenChange = 0;
-        document.addEventListener('fullscreenchange', () => {
+        const sync = () => {
             this._lastFullscreenChange = Date.now();
-            if (!document.fullscreenElement) {
-                this._el.container.classList.remove('fs-autohide');
-            } else {
-                this._el.container.classList.add('fs-autohide');
-            }
+            const isFs = !!document.fullscreenElement;
+            this._el.container.classList.toggle('fs-autohide', isFs);
+            this._el.btnFullscreen?.setAttribute('aria-pressed', String(isFs));
+            this._el.btnFullscreen?.setAttribute('aria-label', isFs ? 'Exit fullscreen' : 'Enter fullscreen');
             this._handleResize();
-        });
+        };
+        document.addEventListener('fullscreenchange', sync);
         document.addEventListener('fullscreenerror', () => {
             this._el.container.classList.remove('fs-autohide');
+            this._el.btnFullscreen?.setAttribute('aria-pressed', 'false');
         });
     }
 
+    /**
+     * Write a bottom-bar metric without wasting space on a visible label.
+     *
+     * Only the value is rendered; the full description goes to the tooltip and
+     * aria-label so the information is still available on hover and to screen
+     * readers.
+     *
+     * @param {'latency'} key
+     * @param {string} value - Compact value, e.g. "1920×1080" or "42ms"
+     * @param {string} [label] - Full description for title/aria-label
+     */
+    _setMetric(key, value, label) {
+        const el = this._el?.[key];
+        if (!el) return;
+        const valueEl = el.querySelector('.rdp-metric-value') || el;
+        valueEl.textContent = value;
+        if (label) {
+            el.setAttribute('title', label);
+            el.setAttribute('aria-label', label);
+        }
+        el.dataset.value = value;
+    }
+
     _updateStatus(state, text) {
-        this._el.statusDot.classList.toggle('connected', state === 'connected');
-        this._el.statusText.textContent = text;
+        const status = this._el?.status;
+        if (status) {
+            // The glyph is chosen by CSS from data-state, so one attribute swap
+            // switches between the disconnected / live / error icons.
+            status.dataset.state = state;
+            const connectable = state === 'disconnected' || state === 'error';
+            status.title = connectable ? `${text || state} — click to connect` : (text || state);
+            status.setAttribute('aria-label', connectable
+                ? `${text || state}. Click to connect.`
+                : (text || state));
+            // Only offer the dialog affordance when there is no live session.
+            status.disabled = !connectable;
+            status.style.cursor = connectable ? 'pointer' : 'default';
+        }
+        // Text stays for assistive tech only; nothing is rendered visually.
+        if (this._el?.statusText) this._el.statusText.textContent = text;
+    }
+
+    // --------------------------------------------------
+    // PRIVATE: FLOATING HUD AUTO-HIDE
+    // --------------------------------------------------
+
+    /**
+     * Wire up the floating HUD: one compact panel that folds away when idle.
+     *
+     * Reopening is deliberately explicit - the user presses the slim grip that
+     * remains at the top edge, or the pin button. Simply moving the pointer in
+     * the remote desktop never reopens it, which is what made the earlier
+     * two-bar layout feel like it was constantly jumping into view.
+     */
+    _setupChromeAutohide() {
+        this._chromeHideDelay = this.options.chromeHideDelayMs ?? 2600;
+        this._chromeHidden = false;
+        this._chromeHideTimer = null;
+        this._chromePinned = false;
+
+        const container = this._el.container;
+
+        // The grip is the only affordance that reopens the HUD.
+        this._el.hudHandle?.addEventListener('click', () => {
+            this._showChrome(true);
+        });
+
+        // Plain activity in the remote desktop only postpones hiding; it never
+        // reveals the HUD. Keeps the picture unobstructed during real work.
+        this._chromeActivityHandler = () => {
+            if (!this._chromeHidden) this._scheduleChromeHide();
+        };
+        container.addEventListener('mousemove', this._chromeActivityHandler);
+        container.addEventListener('mousedown', this._chromeActivityHandler);
+        container.addEventListener('wheel', this._chromeActivityHandler, { passive: true });
+
+        // Hovering or focusing the panel itself keeps it open.
+        const hud = this._el.hud;
+        hud?.addEventListener('mouseenter', () => this._pinChrome(true));
+        hud?.addEventListener('mouseleave', () => this._pinChrome(false));
+        container.addEventListener('focusin', (e) => {
+            // Only the HUD pins it; focus in the remote screen (the hidden IME
+            // field) is normal usage and must not block hiding.
+            if (this._isChromeElement(e.target)) this._pinChrome(true);
+        });
+        container.addEventListener('focusout', (e) => {
+            if (this._isChromeElement(e.target) && !this._isChromeElement(e.relatedTarget)) {
+                this._pinChrome(false);
+            }
+        });
+
+        // Leaving the component entirely should not leave it revealed.
+        container.addEventListener('mouseleave', () => {
+            if (!this._chromePinned) this._scheduleChromeHide();
+        });
+
+        // Explicit pin toggle: keeps the HUD on screen regardless of idle time.
+        this._el.btnPin?.addEventListener('click', () => this._toggleChromePin());
+        this._updatePinButton();
+
+        // Dock picker: move the HUD to any screen edge.
+        this._el.btnDock?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._toggleDockPop();
+        });
+        this._el.btnDock?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                this._toggleDockPop();
+            }
+        });
+        this._shadow.addEventListener('click', (e) => {
+            if (!this._dockPopOpen) return;
+            if (e.composedPath().includes(this._el.dockPop)) return;
+            if (e.composedPath().includes(this._el.btnDock)) return;
+            this._closeDockPop();
+        });
+        this._shadow.addEventListener('keydown', (e) => {
+            if (!this._dockPopOpen || e.key !== 'Escape') return;
+            e.preventDefault();
+            this._closeDockPop();
+            this._el.btnDock?.focus();
+        });
+        this.setHudDock(this.options.hudDock);
+    }
+
+    // --------------------------------------------------
+    // PRIVATE: HUD DOCKING (top / right / bottom / left)
+    // --------------------------------------------------
+
+    /** @public @returns {'top'|'right'|'bottom'|'left'} Current dock edge. */
+    getHudDock() {
+        return this._hudDock || 'top';
+    }
+
+    /**
+     * Move the floating HUD to another screen edge.
+     *
+     * Horizontally docked panels lay out as a single row; vertically docked ones
+     * stack into a column. The markup is shared, so only layout direction and
+     * edge offsets change.
+     *
+     * @public
+     * @param {'top'|'right'|'bottom'|'left'} dock
+     * @returns {string} The applied dock edge
+     */
+    setHudDock(dock) {
+        const allowed = ['top', 'right', 'bottom', 'left'];
+        const next = allowed.includes(dock) ? dock : 'top';
+        this._hudDock = next;
+        this.options.hudDock = next;
+
+        const container = this._el?.container;
+        if (container) container.dataset.hudDock = next;
+
+        const labels = { top: 'top', right: 'right', bottom: 'bottom', left: 'left' };
+        if (this._el?.btnDock) {
+            this._el.btnDock.title = `Move controls (currently ${labels[next]})`;
+            this._el.btnDock.setAttribute('aria-label', this._el.btnDock.title);
+        }
+
+        this._closeDockPop();
+        // Geometry changes invalidate the collapsed toolbar measurements.
+        this._lastRequestedWidth = 0;
+        this._lastRequestedHeight = 0;
+        requestAnimationFrame(() => this._updateToolbarOverflow());
+        try { this._emit('dock', { dock: next }); } catch {}
+        return next;
+    }
+
+    _toggleDockPop() {
+        if (this._dockPopOpen) this._closeDockPop();
+        else this._openDockPop();
+    }
+
+    _openDockPop() {
+        const pop = this._el?.dockPop;
+        if (!pop) return;
+        this._renderDockPop();
+        pop.classList.add('open');
+        this._dockPopOpen = true;
+        this._el.btnDock?.setAttribute('aria-expanded', 'true');
+        this._showChrome(false);
+        requestAnimationFrame(() => pop.querySelector('.rdp-dock-item')?.focus());
+    }
+
+    _closeDockPop() {
+        const pop = this._el?.dockPop;
+        if (!pop) return;
+        pop.classList.remove('open');
+        this._dockPopOpen = false;
+        this._el.btnDock?.setAttribute('aria-expanded', 'false');
+        this._scheduleChromeHide();
+    }
+
+    _renderDockPop() {
+        const pop = this._el?.dockPop;
+        if (!pop) return;
+        // Edge glyphs: a frame with the active edge filled.
+        const icon = (edge) => {
+            const paths = {
+                top: '<path d="M3 9h18"/>',
+                bottom: '<path d="M3 15h18"/>',
+                left: '<path d="M9 3v18"/>',
+                right: '<path d="M15 3v18"/>',
+            };
+            return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/>${paths[edge]}</svg>`;
+        };
+        const rows = [
+            ['top', 'Dock top', 'row'],
+            ['bottom', 'Dock bottom', 'row'],
+            ['left', 'Dock left', 'column'],
+            ['right', 'Dock right', 'column'],
+        ];
+        pop.innerHTML = rows.map(([edge, label]) => {
+            const active = this.getHudDock() === edge;
+            return `<button class="rdp-dock-item${active ? ' active' : ''}" role="menuitem" data-dock="${edge}" aria-pressed="${active}">`
+                + `${icon(edge)}<span>${label}</span></button>`;
+        }).join('');
+        pop.querySelectorAll('[data-dock]').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.setHudDock(btn.getAttribute('data-dock'));
+            });
+        });
+    }
+
+    /** Toggle the manual "keep controls visible" preference. */
+    _toggleChromePin() {
+        const pinned = !this.options.keepChromeVisible;
+        this.setChromePinned(pinned);
+        return pinned;
+    }
+
+    /**
+     * Persistently keep the HUD visible (or return it to auto-hide).
+     * @public
+     * @param {boolean} pinned
+     */
+    setChromePinned(pinned) {
+        this.options.keepChromeVisible = !!pinned;
+        this._updatePinButton();
+        if (this.options.keepChromeVisible) {
+            this._showChrome(false);
+            // Persisted pin disables auto-hide entirely.
+            this._el.container.classList.remove('rdp-chrome-autohide');
+            this._el.container.classList.remove('rdp-chrome-hidden');
+            this._chromeHidden = false;
+            if (this._chromeHideTimer) {
+                clearTimeout(this._chromeHideTimer);
+                this._chromeHideTimer = null;
+            }
+        } else {
+            this._syncChromeAutohide();
+        }
+        return this.options.keepChromeVisible;
+    }
+
+    /** @public @returns {boolean} True when the HUD is manually pinned open. */
+    isChromePinned() {
+        return !!this.options.keepChromeVisible;
+    }
+
+    _updatePinButton() {
+        const btn = this._el?.btnPin;
+        if (!btn) return;
+        const on = !!this.options.keepChromeVisible;
+        btn.setAttribute('aria-pressed', String(on));
+        btn.classList.toggle('on', on);
+        btn.title = on ? 'Controls pinned open' : 'Keep controls visible';
+    }
+
+    /** Temporarily pin the HUD open (hover, focus, open menu). */
+    _pinChrome(pinned) {
+        this._chromePinned = !!pinned;
+        if (pinned) this._showChrome(false);
+        else this._scheduleChromeHide();
+    }
+
+    /** True when the node lives inside the floating HUD panel. */
+    _isChromeElement(node) {
+        if (!node || node.nodeType !== 1) return false;
+        return !!this._el.hud?.contains(node);
+    }
+
+    _showChrome(schedule) {
+        if (this._chromeHideTimer) {
+            clearTimeout(this._chromeHideTimer);
+            this._chromeHideTimer = null;
+        }
+        if (this._chromeHidden) {
+            this._chromeHidden = false;
+            this._el.container.classList.remove('rdp-chrome-hidden');
+        }
+        this._el.hudHandle?.setAttribute('aria-expanded', 'true');
+        if (schedule) this._scheduleChromeHide();
+    }
+
+    _scheduleChromeHide() {
+        if (this._chromeHideTimer) clearTimeout(this._chromeHideTimer);
+        if (!this._chromeAutohideEnabled() || this._chromePinned) return;
+        this._chromeHideTimer = setTimeout(() => {
+            this._chromeHideTimer = null;
+            if (!this._chromeAutohideEnabled() || this._chromePinned) return;
+            // Never hide under a pointer that is resting on the panel.
+            if (this._el.hud?.matches(':hover')) return;
+            this._chromeHidden = true;
+            this._el.container.classList.add('rdp-chrome-hidden');
+            this._el.hudHandle?.setAttribute('aria-expanded', 'false');
+        }, this._chromeHideDelay);
+    }
+
+    /** Auto-hide only makes sense while a live session fills the screen. */
+    _chromeAutohideEnabled() {
+        if (this.options.keepChromeVisible) return false;
+        if (!this._isConnected) return false;
+        if (this._isModalOpen?.()) return false;
+        if (this._overflowMenuOpen) return false;
+        if (this._dockPopOpen) return false;
+        if (this._el.routePop?.classList.contains('open')) return false;
+        if (this._keyboardVisible) return false;
+        return true;
+    }
+
+    /** Apply/remove the auto-hide capability and reset to the revealed state. */
+    _syncChromeAutohide() {
+        const container = this._el.container;
+        const enabled = this._isConnected
+            && this.options.autoHideChrome !== false
+            && !this.options.keepChromeVisible;
+        container.classList.toggle('rdp-chrome-autohide', enabled);
+        if (!enabled) {
+            this._chromeHidden = false;
+            container.classList.remove('rdp-chrome-hidden');
+            if (this._chromeHideTimer) {
+                clearTimeout(this._chromeHideTimer);
+                this._chromeHideTimer = null;
+            }
+            return;
+        }
+        this._showChrome(true);
     }
 
     /**
@@ -2729,8 +4062,11 @@ export class RDPClient {
     _updateReconnectBtn() {
         const btn = this._el?.btnReconnect;
         if (!btn) return;
-        btn.classList.toggle('on', !!this._autoReconnect);
-        btn.textContent = this._autoReconnect ? 'Reconnect: On' : 'Reconnect: Off';
+        const on = !!this._autoReconnect;
+        btn.classList.toggle('on', on);
+        btn.setAttribute('aria-pressed', String(on));
+        btn.title = on ? 'Auto reconnect: on' : 'Auto reconnect: off';
+        btn.setAttribute('aria-label', btn.title);
     }
 
     _clearReconnectTimer() {
@@ -2750,7 +4086,7 @@ export class RDPClient {
             this._updateReconnectBtn();
             this._updateStatus('disconnected', 'Disconnected');
             this._setLoadingMode('idle');
-            if (this._el?.loading) this._el.loading.querySelector('p').textContent = 'Click Connect to start';
+            if (this._el?.loading) this._el.loading.querySelector('p').textContent = 'Click to connect';
             return;
         }
         const delay = this.options.reconnectDelay || 10000;
@@ -3011,12 +4347,14 @@ export class RDPClient {
     _toggleRoutePop() {
         if (!this._el?.routePop) return;
         const pop = this._el.routePop;
-        if (pop.classList.contains('open')) {
-            pop.classList.remove('open');
-            return;
-        }
+        const isOpen = pop.classList.toggle('open');
+        this._el.transport?.setAttribute('aria-expanded', String(isOpen));
+        if (!isOpen) return;
         this._renderRoutePop();
-        pop.classList.add('open');
+        // Move focus into the popup so it is reachable by keyboard.
+        requestAnimationFrame(() => {
+            pop.querySelector('.rdp-route-item:not(:disabled)')?.focus();
+        });
     }
 
     _renderRoutePop() {
@@ -3742,7 +5080,7 @@ export class RDPClient {
                 if (l.lossPct != null && l.lossPct > 0.5) extra.push(`loss ${l.lossPct.toFixed(1)}%`);
                 if (l.jitterMs != null && l.jitterMs > 30) extra.push(`jit ${l.jitterMs}ms`);
                 const suffix = extra.length ? ` · ${extra.join(' · ')}` : '';
-                this._el.latency.textContent = `Latency: ${rttMs}ms (${tag}${suffix})`;
+                this._setMetric('latency', `${rttMs}ms`, `Latency ${rttMs}ms (${tag}${suffix})`);
                 this._emit('latency', {
                     latencyMs: rttMs, transport: 'rtc',
                     lossPct: l.lossPct ?? null, jitterMs: l.jitterMs ?? null,
@@ -4068,13 +5406,14 @@ export class RDPClient {
         this._el.canvas.style.display = 'block';
         this._el.loading.style.display = 'none';
         this._setLoadingMode('idle');
-        this._el.btnConnect.disabled = true;
         this._el.btnDisconnect.disabled = false;
         this._el.btnKeyboard.disabled = false;
         this._el.btnMute.disabled = false;
         this._el.btnScreenshot.disabled = false;
         this._el.btnClipboard.disabled = false;
         this._focusInput();
+        // Live session: let the floating chrome fade away when idle.
+        this._syncChromeAutohide();
 
         this._initAudio();
 
@@ -4137,6 +5476,7 @@ export class RDPClient {
         this._updateTransportBadge();
         this._stopRouteLoop();
         if (this._el?.routePop) this._el.routePop.classList.remove('open');
+        this._el?.transport?.setAttribute('aria-expanded', 'false');
         if (this._pingTimer) {
             clearInterval(this._pingTimer);
             this._pingTimer = null;
@@ -4152,10 +5492,9 @@ export class RDPClient {
             this._updateStatus('disconnected', 'Disconnected');
             this._el.canvas.style.display = 'none';
             this._el.loading.style.display = 'block';
-            this._el.loading.querySelector('p').textContent = 'Click Connect to start';
+            this._el.loading.querySelector('p').textContent = 'Click to connect';
             this._setLoadingMode('idle');
         }
-        this._el.btnConnect.disabled = false;
         this._el.btnDisconnect.disabled = true;
         this._el.btnKeyboard.disabled = true;
         this._el.btnMute.disabled = true;
@@ -4164,6 +5503,8 @@ export class RDPClient {
         
         // Hide virtual keyboard on disconnect
         this.hideKeyboard();
+        // No live session: pin the chrome back in place.
+        this._syncChromeAutohide();
 
         // Drop any locally tracked key-down state: the session is gone, so the
         // remote will not receive further key-ups from this client.
@@ -4297,7 +5638,7 @@ export class RDPClient {
             extra.push(`loss ${this._wsQuality.lossPct.toFixed(1)}%`);
         }
         const suffix = extra.length ? ` (${extra.join(' · ')})` : '';
-        this._el.latency.textContent = `Latency: ${last}ms?${suffix}`;
+        this._setMetric('latency', `${last}ms`, `Latency ${last}ms${suffix}`);
     }
 
     _updateWsLoss() {
@@ -4422,7 +5763,7 @@ export class RDPClient {
         if (q.lossPct != null && q.lossPct > 0.5) extra.push(`loss ${q.lossPct.toFixed(1)}%`);
         if (q.jitterMs != null && q.jitterMs > 30) extra.push(`jit ${q.jitterMs}ms`);
         const suffix = extra.length ? ` (${extra.join(' · ')})` : '';
-        this._el.latency.textContent = `Latency: ${rt}ms${suffix}`;
+        this._setMetric('latency', `${rt}ms`, `Latency ${rt}ms${suffix}`);
     }
 
     // --------------------------------------------------
@@ -5211,6 +6552,8 @@ export class RDPClient {
         overlay.style.top = `${top}px`;
         
         this._keyboardVisible = true;
+        this._el.btnKeyboard?.setAttribute('aria-pressed', 'true');
+        this._showChrome(false);   // keep the toolbar visible while typing on it
         this._emit('keyboardShow');
     }
     
@@ -5226,6 +6569,8 @@ export class RDPClient {
         this._el.keyboardOverlay.classList.remove('visible');
         this._keyboardVisible = false;
         this._resetKeyboardModifiers();
+        this._el.btnKeyboard?.setAttribute('aria-pressed', 'false');
+        this._scheduleChromeHide();
         this._emit('keyboardHide');
     }
 
@@ -5737,13 +7082,11 @@ export class RDPClient {
         const rect = this._el.screen.getBoundingClientRect();
         // Target the physical pixels the canvas is painted on: any mismatch makes
         // the browser resample the frame (bilinear filtering = blurry text).
-        // In fullscreen the screen border is removed, so nothing has to be
-        // subtracted there.
-        const fullscreen = this._el.container.classList.contains('fs-autohide');
-        const inset = fullscreen ? 0 : 4;
+        // The screen surface is now edge-to-edge with no border, so nothing has
+        // to be subtracted from its measured size.
         const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, this.options.maxPixelRatio || 1));
-        let width = Math.floor((rect.width - inset) * dpr);
-        let height = Math.floor((rect.height - inset) * dpr);
+        let width = Math.floor(rect.width * dpr);
+        let height = Math.floor(rect.height * dpr);
 
         // do never send resize below RDP server minimums or above maximums
         const minRdpServerDimensions = { width: 640, height: 480 };
@@ -5805,9 +7148,8 @@ export class RDPClient {
     }
 
     _handleServerResize(width, height) {
-        // Update resolution display
-        this._el.resolution.textContent = `Resolution: ${width}x${height}`;
-        
+        // The resolution readout was removed from the HUD; keep the value on the
+        // instance so getResolution() and integrations still see it.
         // When using OffscreenCanvas (transferred to worker), we cannot resize
         // the HTMLCanvasElement directly. The worker owns the canvas now.
         // We need to notify the worker to resize the OffscreenCanvas instead.

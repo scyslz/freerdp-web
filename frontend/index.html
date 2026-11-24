@@ -2,312 +2,71 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="apple-mobile-web-app-title" content="RDP Web Client">
+    <meta name="theme-color" content="#0a0a1a">
     <link rel="icon" type="image/x-icon" href="/favicons/favicon.ico">
     <link rel="apple-touch-icon" sizes="180x180" href="/favicons/apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="32x32" href="/favicons/favicon-32x32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="/favicons/favicon-16x16.png">
     <link rel="manifest" href="/favicons/site.webmanifest">
-    <title>RDP Web Client - Demo</title>
+    <title>RDP Web Client</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        
+
         html, body {
             height: 100%;
+            height: 100dvh;
         }
-        
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0a0a1a;
+            background: #0b0f17;
             color: #fff;
-            display: flex;
-            flex-direction: column;
             overflow: hidden;
         }
 
-        .demo-header {
-            background: #111;
-            padding: 12px 24px;
-            border-bottom: 1px solid #333;
-            flex-shrink: 0;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            max-height: 100px;
-            overflow: hidden;
-            transition: max-height 0.25s ease, padding 0.25s ease,
-                        opacity 0.2s ease, border-color 0.25s ease;
+        /* The page shell follows the OS colour scheme so the area around the
+           client matches it; the client itself themes independently. */
+        @media (prefers-color-scheme: light) {
+            body { background: #eef1f6; color: #101828; }
         }
 
-        body.header-hidden .demo-header {
-            max-height: 0;
-            padding-top: 0;
-            padding-bottom: 0;
-            border-bottom-color: transparent;
-            opacity: 0;
-            pointer-events: none;
-        }
-
-        .demo-header h1 {
-            font-size: 1.4rem;
-            font-weight: 500;
-        }
-
-        .info-btn {
-            background: #0f3460;
-            border: none;
-            color: #fff;
-            width: 36px;
-            height: 36px;
-            border-radius: 10%;
-            cursor: pointer;
-            font-size: 1.1rem;
-            transition: background 0.2s;
-        }
-
-        .info-btn:hover { background: #1a4a7a; }
-
-        .demo-content {
-            flex: 1;
-            display: flex;
-            position: relative;
+        /* The client owns the entire viewport. */
+        #rdp-container {
+            width: 100%;
+            height: 100%;
+            height: 100dvh;
             min-height: 0;
             overflow: hidden;
         }
-
-        /* RDP Container - this is where the RDPClient attaches */
-        #rdp-container {
-            flex: 1;
-            min-width: 0;
-            overflow: hidden;
-        }
-
-        /* Sidebar overlay panel */
-        .sidebar {
-            position: absolute;
-            top: 12px;
-            right: 12px;
-            bottom: 12px;
-            width: 400px;
-            background: rgba(21, 21, 37, 0.95);
-            border-radius: 8px;
-            padding: 20px;
-            overflow-y: auto;
-            box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
-            transform: translateX(calc(100% + 20px));
-            transition: transform 0.3s ease;
-            z-index: 100;
-        }
-
-        .sidebar.open {
-            transform: translateX(0);
-        }
-
-        .sidebar-close {
-            position: absolute;
-            top: 12px;
-            right: 12px;
-            background: transparent;
-            border: none;
-            color: #888;
-            font-size: 1.4rem;
-            cursor: pointer;
-            line-height: 1;
-        }
-
-        .sidebar-close:hover { color: #fff; }
-
-        .sidebar h2 {
-            font-size: 1rem;
-            margin-bottom: 16px;
-            color: #51cf66;
-        }
-
-        .sidebar h3 {
-            font-size: 0.85rem;
-            margin: 16px 0 8px;
-            color: #888;
-        }
-
-        .code-block {
-            background: #0d0d15;
-            border: 1px solid #333;
-            border-radius: 4px;
-            padding: 12px;
-            font-family: 'Monaco', 'Menlo', monospace;
-            font-size: 0.75rem;
-            overflow-x: auto;
-            margin-bottom: 12px;
-        }
-
-        .code-block code {
-            color: #e0e0e0;
-            white-space: pre;
-        }
-
-        .api-list {
-            list-style: none;
-            font-size: 0.85rem;
-        }
-
-        .api-list li {
-            padding: 6px 0;
-            border-bottom: 1px solid #222;
-        }
-
-        .api-list code {
-            color: #51cf66;
-            font-family: 'Monaco', 'Menlo', monospace;
-        }
-
-        .demo-buttons {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-top: 16px;
-        }
-
-        .demo-btn {
-            background: #0f3460;
-            border: none;
-            color: #fff;
-            padding: 8px 14px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.8rem;
-        }
-
-        .demo-btn:hover { background: #1a4a7a; }
-        .demo-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     </style>
 </head>
 <body>
-    <header class="demo-header">
-        <h1>🖥️ RDP Web Client</h1>
-        <button class="info-btn" id="info-btn" title="API Documentation">ℹ️</button>
-    </header>
-
-    <main class="demo-content">
-        <!-- RDP Client Container -->
-        <div id="rdp-container"></div>
-
-        <!-- Documentation Sidebar (overlay) -->
-        <aside class="sidebar" id="sidebar">
-            <h2>Quick Start</h2>
-            <button class="sidebar-close" id="sidebar-close">×</button>
-
-            <h3>1. Import the module</h3>
-            <div class="code-block"><code>import { RDPClient } from './rdp-client.js';</code></div>
-
-            <h3>2. Create instance</h3>
-            <div class="code-block"><code>const client = new RDPClient(
-  document.getElementById('container'),
-  {
-    wsUrl: 'ws://localhost:8765',
-    showTopBar: true,
-    showBottomBar: true,
-    keepConnectionModalOpen: false
-  }
-);</code></div>
-
-            <h3>3. Connect programmatically</h3>
-            <div class="code-block"><code>await client.connect({
-  host: '192.168.1.100',
-  port: 3389,
-  user: 'Administrator',
-  pass: 'password'
-});</code></div>
-
-            <h2>Public API</h2>
-            <ul class="api-list">
-                <li><code>connect(credentials)</code> - Connect to RDP server (async)</li>
-                <li><code>disconnect()</code> - Disconnect session (async)</li>
-                <li><code>sendKeys(keys, opts)</code> - Send keystrokes (async)</li>
-                <li><code>sendKeyCombo(combo)</code> - Send key combo</li>
-                <li><code>sendCtrlAltDel()</code> - Send Ctrl+Alt+Del</li>
-                <li><code>sendBackspace(count)</code> - Send backspaces (async)</li>
-                <li><code>sendMouseMove(x, y)</code> - Move mouse cursor</li>
-                <li><code>sendMouseClick(opts)</code> - Click mouse (async)</li>
-                <li><code>sendMouseScroll(opts)</code> - Scroll mouse</li>
-                <li><code>setTheme(config)</code> - Apply theme dynamically</li>
-                <li><code>getStatus()</code> - Get connection status</li>
-                <li><code>isConnected()</code> - Check if connected</li>
-                <li><code>getLatency()</code> - Get latency in ms</li>
-                <li><code>getMuted()</code> - Get audio mute state</li>
-                <li><code>setMuted(bool)</code> - Set audio mute</li>
-                <li><code>getResolution()</code> - Get current resolution</li>
-                <li><code>getScreenshot(type, quality)</code> - Capture screenshot (async)</li>
-                <li><code>downloadScreenshot(type, quality)</code> - Download screenshot (async)</li>
-                <li><code>showKeyboard()</code> - Show virtual keyboard</li>
-                <li><code>hideKeyboard()</code> - Hide virtual keyboard</li>
-                <li><code>isKeyboardVisible()</code> - Check keyboard visibility</li>
-                <li><code>getSecurityPolicy()</code> - Get security policy (frozen)</li>
-                <li><code>validateDestination(host, port)</code> - Check if allowed</li>
-                <li><code>setMinDimensions(w, h)</code> - Set min canvas size</li>
-                <li><code>on(event, fn)</code> - Add event listener</li>
-                <li><code>off(event, fn)</code> - Remove listener</li>
-                <li><code>destroy()</code> - Cleanup resources (async)</li>
-            </ul>
-
-            <h2>Theming</h2>
-            <div class="code-block"><code>// Use preset: 'dark', 'light', 'midnight', 'highContrast'
-client.setTheme({ preset: 'light' });
-
-// Or customize colors
-client.setTheme({
-  colors: { accent: '#00b4d8' }
-});</code></div>
-
-            <h2>Events</h2>
-            <ul class="api-list">
-                <li><code>'connected'</code> - Session connected</li>
-                <li><code>'disconnected'</code> - Session ended</li>
-                <li><code>'resize'</code> - Resolution changed</li>
-                <li><code>'latency'</code> - Latency updated ({ latencyMs })</li>
-                <li><code>'error'</code> - Error occurred</li>
-                <li><code>'mute'</code> - Audio mute state changed</li>
-                <li><code>'clipboard'</code> - Text copied from remote ({ text })</li>
-                <li><code>'clipboardPush'</code> - Local text pushed to remote ({ chars })</li>
-                <li><code>'keyboardShow'</code> - Virtual keyboard shown</li>
-                <li><code>'keyboardHide'</code> - Virtual keyboard hidden</li>
-            </ul>
-
-            <h2>Try It</h2>
-            <div class="demo-buttons">
-                <button class="demo-btn" id="btn-status">Get Status</button>
-                <button class="demo-btn" id="btn-ctrlaltdel">Ctrl+Alt+Del</button>
-                <button class="demo-btn" id="btn-type">Type "Hello"</button>
-                <button class="demo-btn" id="btn-mute">Toggle Mute</button>
-                <button class="demo-btn" id="btn-keyboard">Toggle Keyboard</button>
-            </div>
-        </aside>
-    </main>
+    <div id="rdp-container"></div>
 
     <script type="module">
         import { RDPClient } from './rdp-client.js';
 
-        // Create the RDP client instance
-        // wsUrl defaults to same-origin /ws/ (nginx proxies to backend)
+        // Create the RDP client instance.
+        // wsUrl defaults to same-origin /ws/ (nginx proxies to the backend).
         const client = new RDPClient(document.getElementById('rdp-container'), {
             showTopBar: true,
             showBottomBar: true,
-            keepConnectionModalOpen: false
+            keepConnectionModalOpen: false,
+            // Follow the OS theme on load; the toolbar toggle overrides it.
+            themeMode: 'auto'
         });
 
-        // Register event handlers
         client.on('connected', (data) => {
-            document.body.classList.add('header-hidden');
             console.log('Connected!', data);
         });
 
         client.on('disconnected', () => {
-            document.body.classList.remove('header-hidden');
             console.log('Disconnected');
         });
 
         client.on('error', (err) => {
-            document.body.classList.remove('header-hidden');
             console.error('Error:', err.message);
         });
 
@@ -319,67 +78,8 @@ client.setTheme({
             console.log('Audio mute state changed:', muted);
         });
 
-
-        // --------------------------------------------
-        // from here we have just demo UI Related stuff
-        // --------------------------------------------
-
-        // Expose to window for demo
+        // Expose for manual debugging in the browser console.
         window.rdpClient = client;
-
-        // Sidebar toggle
-        const sidebar = document.getElementById('sidebar');
-        document.getElementById('info-btn').addEventListener('click', () => {
-            sidebar.classList.toggle('open');
-        });
-        document.getElementById('sidebar-close').addEventListener('click', () => {
-            sidebar.classList.remove('open');
-        });
-
-        // Demo button handlers
-        document.getElementById('btn-status').addEventListener('click', () => {
-            const status = client.getStatus();
-            alert(JSON.stringify(status, null, 2));
-        });
-
-        document.getElementById('btn-ctrlaltdel').addEventListener('click', () => {
-            try {
-                client.sendCtrlAltDel();
-                console.log('Sent Ctrl+Alt+Delete');
-            } catch (e) {
-                alert(e.message);
-            }
-        });
-
-        document.getElementById('btn-type').addEventListener('click', async () => {
-            try {
-                await client.sendKeys('Hello');
-                console.log('Typed "Hello"');
-            } catch (e) {
-                alert(e.message);
-            }
-        });
-
-        document.getElementById('btn-mute').addEventListener('click', () => {
-            const status = client.getStatus();
-            client.setMuted(!status.muted);
-            console.log('Muted:', !status.muted);
-        });
-
-        document.getElementById('btn-keyboard').addEventListener('click', () => {
-            if(client.isConnected() === false) {
-                alert('Not connected');
-                return;
-            }
-            if (client.isKeyboardVisible()) {
-                client.hideKeyboard();
-                console.log('Keyboard hidden');
-            } else {
-                client.showKeyboard();
-                console.log('Keyboard shown');
-            }
-        });
-
     </script>
 </body>
 </html>
