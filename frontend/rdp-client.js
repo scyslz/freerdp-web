@@ -849,6 +849,30 @@ input:focus-visible,
     to { transform: rotate(360deg); }
 }
 
+/* Resize / fullscreen transition overlay: dim the (preserved) old frame and
+   show a spinner until the first fresh frame is composited. */
+.rdp-resize-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: var(--rdp-space-3);
+    background: color-mix(in srgb, var(--rdp-surface, #000) 45%, transparent);
+    backdrop-filter: blur(2px);
+    color: var(--rdp-text, #fff);
+    pointer-events: none;
+}
+.rdp-resize-overlay.active { display: flex; }
+.rdp-resize-overlay .rdp-spinner { width: 40px; height: 40px; }
+.rdp-resize-overlay span {
+    font-size: var(--rdp-font-size-small);
+    letter-spacing: 0.02em;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
 /* Idle: a "+" affordance instead of a spinner; clicking opens the modal. */
 .rdp-plus {
     display: none;
@@ -1476,6 +1500,10 @@ const TEMPLATE = `
             </div>
             <textarea class="rdp-ime" aria-hidden="true" tabindex="0" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
             <canvas class="rdp-canvas" width="1280" height="720" style="display: none;"></canvas>
+            <div class="rdp-resize-overlay" role="status" aria-live="polite">
+                <div class="rdp-spinner"></div>
+                <span>Adjusting resolution…</span>
+            </div>
             <div class="rdp-toast" role="status" aria-live="polite"></div>
             
             <!-- API Cursor Overlay - shown when using programmatic mouse methods -->
@@ -2074,6 +2102,7 @@ export class RDPClient {
             bottombar: $('.rdp-bottombar'),
             screen: $('.rdp-screen'),
             canvas: $('.rdp-canvas'),
+            resizeOverlay: $('.rdp-resize-overlay'),
             toast: $('.rdp-toast'),
             loading: $('.rdp-loading'),
             ime: $('.rdp-ime'),
@@ -2594,6 +2623,11 @@ export class RDPClient {
                     this._lastFrameGapAt = Date.now();
                     this._frameGapCount = (this._frameGapCount || 0) + 1;
                     console.warn(`[RDPClient] Frame gap detected (${msg.expected} -> ${msg.got})`);
+                    break;
+
+                case 'resizeComplete':
+                    // First fresh frame after a resize/resetGraphics was composited.
+                    this._hideResizeOverlay();
                     break;
                 
             case 'unhandled':
@@ -7203,9 +7237,27 @@ export class RDPClient {
                 (width !== this._lastRequestedWidth || height !== this._lastRequestedHeight)) {
                 this._lastRequestedWidth = width;
                 this._lastRequestedHeight = height;
+                this._showResizeOverlay();
                 this._sendMessage({ type: 'resize', width, height });
             }
         }, delay);
+    }
+
+    /** Show the "adjusting resolution" overlay; hidden on first new frame or timeout. */
+    _showResizeOverlay() {
+        if (!this._el?.resizeOverlay) return;
+        this._el.resizeOverlay.classList.add('active');
+        clearTimeout(this._resizeOverlayTimer);
+        // Safety net: if the server never sends a frame (e.g. it rejects the
+        // resize), don't leave the overlay up forever.
+        this._resizeOverlayTimer = setTimeout(() => this._hideResizeOverlay(), 8000);
+    }
+
+    _hideResizeOverlay() {
+        if (!this._el?.resizeOverlay) return;
+        this._el.resizeOverlay.classList.remove('active');
+        clearTimeout(this._resizeOverlayTimer);
+        this._resizeOverlayTimer = null;
     }
 
     _handleServerResize(width, height) {

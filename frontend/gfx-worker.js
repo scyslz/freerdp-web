@@ -119,6 +119,9 @@ const MAX_PENDING_OPS = 64;
 /** @type {number} Total frames decoded - sent in FACK for MS-RDPEGFX compliance */
 let totalFramesDecoded = 0;
 
+/** True while waiting for the first fully composited frame after a resize/reset. */
+let awaitingResizeFrame = false;
+
 /** @type {Promise|null} Resolves when WASM decoders finish init (success or fail) */
 let wasmInitPromise = null;
 
@@ -1089,6 +1092,7 @@ function applyResetGraphics(msg) {
     // until the first post-resize keyframe arrives (no black flash/freeze).
     if (primaryCanvas && (primaryCanvas.width !== msg.width || primaryCanvas.height !== msg.height)) {
         resizePrimaryCanvasPreservingImage(msg.width, msg.height);
+        awaitingResizeFrame = true;
     }
 }
 
@@ -1336,6 +1340,13 @@ async function endFrame(frameId) {
     totalFramesDecoded++;
     const ackMsg = buildFrameAck(frameId, totalFramesDecoded, pendingOps);
     self.postMessage({ type: 'frameAck', frameId, totalFramesDecoded, queueDepth: pendingOps, data: ackMsg.buffer }, [ackMsg.buffer]);
+
+    // A fresh frame has been fully composited after a resize/reset; tell the
+    // main thread it can remove the "adjusting resolution" overlay.
+    if (awaitingResizeFrame) {
+        awaitingResizeFrame = false;
+        self.postMessage({ type: 'resizeComplete', frameId });
+    }
 }
 
 // ============================================================================
@@ -1510,6 +1521,7 @@ async function processMessage(event) {
                 // stretched into the new canvas until fresh frames arrive.
                 if (primaryCanvas.width !== data.width || primaryCanvas.height !== data.height) {
                     resizePrimaryCanvasPreservingImage(data.width, data.height);
+                    awaitingResizeFrame = true;
                     console.log(`[GFX Worker] Primary canvas resized to ${data.width}x${data.height}`);
                 }
             }
