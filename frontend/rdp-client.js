@@ -1697,7 +1697,7 @@ export class RDPClient {
      * @param {boolean} [options.autoReconnect=false] - Auto reconnect on disconnect
      * @param {boolean} [options.keepConnectionModalOpen=false] - Keep connection modal open when disconnected (cannot be closed)
      * @param {boolean} [options.autoHideChrome=true] - Fold the floating HUD away while a session is in use
-     * @param {number} [options.chromeHideDelayMs=2600] - Idle delay (ms) before the HUD folds away
+     * @param {number} [options.chromeHideDelayMs=2000] - Idle delay (ms) before the HUD folds away
      * @param {boolean} [options.keepChromeVisible=false] - Start with the HUD pinned open
      * @param {'top'|'right'|'bottom'|'left'} [options.hudDock='top'] - Edge the floating HUD docks to
      * @param {boolean} [options.loadingSpinnerOpensModal=true] - Whether clicking the loading area opens the connection modal
@@ -1730,7 +1730,7 @@ export class RDPClient {
             keepConnectionModalOpen: false,
             loadingSpinnerOpensModal: true,
             autoHideChrome: true,          // Fold the HUD away while a live session is in use
-            chromeHideDelayMs: 2600,       // Idle delay before the floating HUD hides
+            chromeHideDelayMs: 2000,       // Idle delay before the floating HUD hides
             keepChromeVisible: false,      // Start with the HUD pinned open
             hudDock: 'top',                // HUD edge: 'top' | 'right' | 'bottom' | 'left'
             minWidth: 0,    // Minimum canvas width (0 = no minimum, scrollbar appears if container is smaller)
@@ -3824,7 +3824,7 @@ export class RDPClient {
      * two-bar layout feel like it was constantly jumping into view.
      */
     _setupChromeAutohide() {
-        this._chromeHideDelay = this.options.chromeHideDelayMs ?? 2600;
+        this._chromeHideDelay = this.options.chromeHideDelayMs ?? 2000;
         this._chromeHidden = false;
         this._chromeHideTimer = null;
         this._chromePinned = false;
