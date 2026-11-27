@@ -1697,7 +1697,7 @@ export class RDPClient {
             showTopBar: true,
             showBottomBar: true,
             mouseThrottleMs: 16,
-            resizeDebounceMs: 2000,
+            resizeDebounceMs: 250,   // Short debounce: window drags settle quickly; fullscreen sends almost immediately
             maxPixelRatio: 2,   // Cap on devicePixelRatio used for 1:1 physical-pixel resolution (keeps 4K/retina frames sane)
             keepConnectionModalOpen: false,
             loadingSpinnerOpensModal: true,
@@ -2837,6 +2837,30 @@ export class RDPClient {
             });
         }
 
+        // System-key interception. On Windows, Win/Meta is reserved by the OS:
+        // a plain keydown preventDefault() in the shadow root is often too late
+        // (the OS opens the Start menu before the page sees the event), and when
+        // focus leaves our capture surface the shadow listener never fires at
+        // all. Capture on window so we always get a first chance to block it.
+        // We only block when focus is NOT on our input surface: if it is, the
+        // normal _handleKeyDown path both forwards the key and preventDefaults.
+        this._windowKeyDownCapture = (e) => {
+            if (!this._isConnected) return;
+            if (e.code !== 'MetaLeft' && e.code !== 'MetaRight' && e.key !== 'OS' && e.key !== 'Meta') return;
+            if (this._isInputFocused()) return; // shadow handler will intercept
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        };
+        this._windowKeyUpCapture = (e) => {
+            if (!this._isConnected) return;
+            if (e.code !== 'MetaLeft' && e.code !== 'MetaRight' && e.key !== 'OS' && e.key !== 'Meta') return;
+            if (this._isInputFocused()) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+        };
+        window.addEventListener('keydown', this._windowKeyDownCapture, { capture: true });
+        window.addEventListener('keyup', this._windowKeyUpCapture, { capture: true });
+
         // Keyboard - scoped to shadow root
         this._shadow.addEventListener('keydown', (e) => this._handleKeyDown(e));
         this._shadow.addEventListener('keyup', (e) => this._handleKeyUp(e));
@@ -2852,6 +2876,12 @@ export class RDPClient {
         window.addEventListener('blur', this._releaseAllKeysHandler);
         document.addEventListener('visibilitychange', this._visibilityReleaseHandler);
         window.addEventListener('pagehide', this._releaseAllKeysHandler);
+        // When the window regains focus, restore keyboard focus to our capture
+        // surface so Meta/system keys keep being intercepted.
+        this._windowFocusHandler = () => {
+            if (this._isConnected) this._focusInput();
+        };
+        window.addEventListener('focus', this._windowFocusHandler);
         
         // Virtual keyboard events
         this._setupVirtualKeyboard();
@@ -3533,6 +3563,10 @@ export class RDPClient {
         window.removeEventListener('blur', this._releaseAllKeysHandler);
         document.removeEventListener('visibilitychange', this._visibilityReleaseHandler);
         window.removeEventListener('pagehide', this._releaseAllKeysHandler);
+        window.removeEventListener('focus', this._windowFocusHandler);
+        window.removeEventListener('keydown', this._windowKeyDownCapture, { capture: true });
+        window.removeEventListener('keyup', this._windowKeyUpCapture, { capture: true });
+        if (navigator.keyboard?.unlock) navigator.keyboard.unlock().catch(() => {});
         this._pressedKeys.clear();
         this._shadow.innerHTML = '';
     }
@@ -3685,6 +3719,13 @@ export class RDPClient {
             this._el.container.classList.toggle('fs-autohide', isFs);
             this._el.btnFullscreen?.setAttribute('aria-pressed', String(isFs));
             this._el.btnFullscreen?.setAttribute('aria-label', isFs ? 'Exit fullscreen' : 'Enter fullscreen');
+            // Keep reserved keys (Win/Esc) in the remote session while fullscreen.
+            if (isFs && navigator.keyboard?.lock) {
+                navigator.keyboard.lock().catch(() => {});
+                this._focusInput();
+            } else if (!isFs && navigator.keyboard?.unlock) {
+                navigator.keyboard.unlock().catch(() => {});
+            }
             this._handleResize();
         };
         document.addEventListener('fullscreenchange', sync);
@@ -4190,10 +4231,22 @@ export class RDPClient {
 
     _toggleFullscreen() {
         if (document.fullscreenElement) {
+            if (navigator.keyboard?.unlock) {
+                navigator.keyboard.unlock().catch(() => {});
+            }
             document.exitFullscreen();
         } else {
             this._el.container.classList.add('fs-autohide');
-            this._container.requestFullscreen();
+            // Fullscreen is a user gesture: acquire Keyboard Lock so reserved
+            // keys (Win, Esc, Alt+Tab) go to the remote session instead of the
+            // local OS. Without this, a local Win menu can pop up over the
+            // remote one. Then restore focus to our capture surface.
+            this._container.requestFullscreen().then(() => {
+                if (navigator.keyboard?.lock) {
+                    navigator.keyboard.lock().catch(() => {});
+                }
+                this._focusInput();
+            }).catch(() => {});
         }
     }
 
@@ -6227,6 +6280,13 @@ export class RDPClient {
 
     _handleKeyDown(e) {
         if (!this._isConnected) return;
+
+        // Win/Meta is reserved by Windows. Whenever a session is active and the
+        // event reaches us, block the local OS shortcut even if focus is on a
+        // toolbar button or the input check below would otherwise bail out.
+        const isMeta = e.code === 'MetaLeft' || e.code === 'MetaRight' || e.key === 'OS' || e.key === 'Meta';
+        if (isMeta) e.preventDefault();
+
         if (!this._isInputFocused()) return;
 
         // While an IME is composing (CJK, dead keys, etc.) let the browser handle
@@ -7112,10 +7172,11 @@ export class RDPClient {
             clearTimeout(this._resizeTimeout);
         }
 
-        // Fullscreen transitions fire multiple resizes during animation;
-        // wait for layout to settle so only the final size is sent
+        // Fullscreen transitions fire a burst of resizes during the animation.
+        // Use a very short delay for fullscreen so the desktop starts adjusting
+        // right away; window drags use the normal (short) debounce.
         const sinceFullscreen = Date.now() - (this._lastFullscreenChange || 0);
-        const delay = sinceFullscreen < 600 ? 450 : this.options.resizeDebounceMs;
+        const delay = sinceFullscreen < 800 ? 80 : this.options.resizeDebounceMs;
 
         this._resizeTimeout = setTimeout(() => {
             if (!this._isConnected) return;

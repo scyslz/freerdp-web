@@ -1011,6 +1011,42 @@ function resetCacheState() {
 }
 
 /**
+ * Resize the primary canvas while keeping the last rendered image visible.
+ * Resizing a canvas clears it, which used to produce a multi-second black
+ * screen while waiting for the server's first post-resize keyframe. Instead we
+ * snapshot the old frame, resize, then stretch the old frame into the new
+ * dimensions so the user sees a (slightly scaled) live image until fresh
+ * frames arrive.
+ */
+function resizePrimaryCanvasPreservingImage(newWidth, newHeight) {
+    if (!primaryCanvas || !primaryCtx) return;
+    if (primaryCanvas.width === newWidth && primaryCanvas.height === newHeight) return;
+
+    let snapshot = null;
+    if (primaryCanvas.width > 0 && primaryCanvas.height > 0) {
+        try {
+            snapshot = new OffscreenCanvas(primaryCanvas.width, primaryCanvas.height);
+            snapshot.getContext('2d').drawImage(primaryCanvas, 0, 0);
+        } catch (e) {
+            snapshot = null;
+        }
+    }
+
+    primaryCanvas.width = newWidth;
+    primaryCanvas.height = newHeight;
+    // Canvas resize resets context state; re-apply compositor settings.
+    primaryCtx.imageSmoothingEnabled = false;
+
+    if (snapshot) {
+        // Stretch the previous frame to fill the new size (letterbox avoided).
+        primaryCtx.drawImage(snapshot, 0, 0, newWidth, newHeight);
+    } else {
+        primaryCtx.fillStyle = '#000000';
+        primaryCtx.fillRect(0, 0, newWidth, newHeight);
+    }
+}
+
+/**
  * Handle resetGraphics from server
  * Reset surfaces and progressive state, but NOT the bitmap cache.
  * Per RDPGFX protocol, bitmap cache persists across reset graphics.
@@ -1049,17 +1085,11 @@ function applyResetGraphics(msg) {
         clearWasmModule._clear_context_reset(clearCtx);
     }
     
-    // Update primary canvas size if needed
+    // Update primary canvas size if needed, keeping the old frame visible
+    // until the first post-resize keyframe arrives (no black flash/freeze).
     if (primaryCanvas && (primaryCanvas.width !== msg.width || primaryCanvas.height !== msg.height)) {
-        primaryCanvas.width = msg.width;
-        primaryCanvas.height = msg.height;
-        
-        // Per MS-RDPEGFX spec: re-apply compositor settings after resize
-        // (canvas resize clears the context state)
-        primaryCtx.imageSmoothingEnabled = false;
-        primaryCtx.fillStyle = '#000000';
-        primaryCtx.fillRect(0, 0, msg.width, msg.height);
-    }    
+        resizePrimaryCanvasPreservingImage(msg.width, msg.height);
+    }
 }
 
 // ============================================================================
@@ -1476,17 +1506,10 @@ async function processMessage(event) {
         case 'resize':
             // Handle canvas/surface resize
             if (primaryCanvas) {
-                // Only resize if dimensions actually changed
+                // Only resize if dimensions actually changed. Keep the old frame
+                // stretched into the new canvas until fresh frames arrive.
                 if (primaryCanvas.width !== data.width || primaryCanvas.height !== data.height) {
-                    primaryCanvas.width = data.width;
-                    primaryCanvas.height = data.height;
-                    
-                    // Per MS-RDPEGFX spec: re-apply compositor settings after resize
-                    // (canvas resize clears the context state)
-                    primaryCtx.imageSmoothingEnabled = false;
-                    primaryCtx.fillStyle = '#000000';
-                    primaryCtx.fillRect(0, 0, data.width, data.height);
-                    
+                    resizePrimaryCanvasPreservingImage(data.width, data.height);
                     console.log(`[GFX Worker] Primary canvas resized to ${data.width}x${data.height}`);
                 }
             }
